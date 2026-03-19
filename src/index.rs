@@ -12,22 +12,49 @@ pub struct IndexContentFile {
     pub entries: Vec<IndexEntry>,
 }
 
+impl IndexContentFile {
+    pub fn video_tracks(&self) -> impl Iterator<Item = &VideoTrackInfo> {
+        self.tracks.iter().filter_map(|t| {
+            if let TrackInfo::Video(v) = t {
+                Some(v)
+            } else {
+                None
+            }
+        })
+    }
+    pub fn audio_tracks(&self) -> impl Iterator<Item = &AudioTrackInfo> {
+        self.tracks.iter().filter_map(|t| {
+            if let TrackInfo::Audio(a) = t {
+                Some(a)
+            } else {
+                None
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum TrackInfo {
-    Video {
-        stream_index: usize,
-        width: u32,
-        height: u32,
-        frames: u64,
-        duration: f64,
-    },
-    Audio {
-        stream_index: usize,
-        sample_rate: u32,
-        channels: u16,
-        samples: u64,
-        duration: f64,
-    },
+    Video(VideoTrackInfo),
+    Audio(AudioTrackInfo),
+}
+
+#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct VideoTrackInfo {
+    pub stream_index: usize,
+    pub width: u32,
+    pub height: u32,
+    pub frames: u64,
+    pub duration: f64,
+    pub is_yuv422: bool,
+}
+#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct AudioTrackInfo {
+    pub stream_index: usize,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples: u64,
+    pub duration: f64,
 }
 
 #[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
@@ -106,40 +133,83 @@ pub fn create_index(
                     ffmpeg_next::codec::context::Context::from_parameters(stream.parameters())
                         .ok()?;
                 let video = codec.decoder().video().ok()?;
-                Some(TrackInfo::Video {
+                tracing::info!(
+                    "Found video stream {}: {}x{}, frames={}, duration={:.2}s, format={:?}",
+                    stream.index(),
+                    video.width(),
+                    video.height(),
+                    stream.frames(),
+                    (stream.duration() as f64) * f64::from(stream.time_base()),
+                    video.format()
+                );
+                Some(TrackInfo::Video(VideoTrackInfo {
                     stream_index: stream.index(),
                     width: video.width(),
                     height: video.height(),
                     frames: stream.frames().max(0) as u64,
                     duration: (stream.duration() as f64) * f64::from(stream.time_base()),
-                })
+                    is_yuv422: matches!(
+                        video.format(),
+                        ffmpeg_next::format::Pixel::YUV422P | ffmpeg_next::format::Pixel::YUYV422
+                    ),
+                }))
             }
             ffmpeg_next::media::Type::Audio => {
                 let codec =
                     ffmpeg_next::codec::context::Context::from_parameters(stream.parameters())
                         .ok()?;
                 let audio = codec.decoder().audio().ok()?;
-                Some(TrackInfo::Audio {
+                tracing::info!(
+                    "Found audio stream {}: {} Hz, {} channels, frames={}, duration={:.2}s, format={:?}",
+                    stream.index(),
+                    audio.rate(),
+                    audio.channels(),
+                    stream.frames(),
+                    (stream.duration() as f64) * f64::from(stream.time_base()),
+                    audio.format()
+                );
+                Some(TrackInfo::Audio(AudioTrackInfo {
                     stream_index: stream.index(),
                     sample_rate: audio.rate(),
                     channels: audio.channels(),
                     samples: stream.frames().max(0) as u64,
                     duration: (stream.duration() as f64) * f64::from(stream.time_base()),
-                })
+                }))
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    let largest_video_size = tracks.iter().fold((0, 0), |acc, track| match track {
-        TrackInfo::Video { width, height, .. } => (acc.0.max(*width), acc.1.max(*height)),
-        TrackInfo::Audio { .. } => acc,
+    let largest_video_size = tracks.iter().fold((0u32, 0u32), |acc, track| {
+        if let TrackInfo::Video(v) = track {
+            if v.width as u64 * v.height as u64 > acc.0 as u64 * acc.1 as u64 {
+                (v.width, v.height)
+            } else {
+                acc
+            }
+        } else {
+            acc
+        }
     });
     for track in &mut tracks {
-        if let TrackInfo::Video { width, height, .. } = track {
-            *width = largest_video_size.0;
-            *height = largest_video_size.1;
+        if let TrackInfo::Video(v) = track {
+            v.width = largest_video_size.0;
+            v.height = largest_video_size.1;
         }
     }
+    // Build sample_rate map for audio streams to accumulate sample counts
+    let audio_sample_rates: std::collections::HashMap<usize, u32> = tracks
+        .iter()
+        .filter_map(|t| {
+            if let TrackInfo::Audio(a) = t {
+                Some((a.stream_index, a.sample_rate))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut audio_sample_counts: std::collections::HashMap<usize, u64> =
+        std::collections::HashMap::new();
+
     let mut last_keyframe_timestamp = 0.0f64;
 
     for (stream, packet) in input.packets() {
@@ -160,6 +230,11 @@ pub fn create_index(
                 }));
             }
             ffmpeg_next::media::Type::Audio => {
+                if let Some(&sr) = audio_sample_rates.get(&stream.index()) {
+                    let samples =
+                        (packet.duration() as f64 * f64::from(time_base) * sr as f64) as u64;
+                    *audio_sample_counts.entry(stream.index()).or_insert(0) += samples;
+                }
                 entries.push(IndexEntry::Audio(AudioEntry {
                     stream_index: stream.index(),
                     position: packet.position() as u64,
@@ -167,6 +242,15 @@ pub fn create_index(
                 }));
             }
             _ => {}
+        }
+    }
+
+    // Update samples field with actual counts from packet durations
+    for track in &mut tracks {
+        if let TrackInfo::Audio(a) = track
+            && let Some(&count) = audio_sample_counts.get(&a.stream_index)
+        {
+            a.samples = count;
         }
     }
 
