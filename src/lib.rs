@@ -278,14 +278,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             .as_ref()
             .is_none_or(|s| s.stream_index != stream_index)
         {
-            *state_guard = Some(
-                VideoDecoderState::new(&handle.path, stream_index).with_context(|| {
-                    format!(
-                        "Failed to initialize video decoder for stream {}",
-                        stream_index
-                    )
-                })?,
-            );
+            *state_guard = Some(VideoDecoderState::new(&handle.path, stream_index)?);
         }
 
         let state = state_guard.as_mut().unwrap();

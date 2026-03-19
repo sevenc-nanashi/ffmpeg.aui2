@@ -17,7 +17,30 @@ impl VideoDecoderState {
             .ok_or_else(|| anyhow::anyhow!("Video stream {} not found", stream_index))?
             .time_base();
         let codec_params = input.stream(stream_index).unwrap().parameters();
-        let codec_ctx = ffmpeg_next::codec::context::Context::from_parameters(codec_params)?;
+        let mut codec_ctx = ffmpeg_next::codec::context::Context::from_parameters(codec_params)?;
+        let threading_kind = ffmpeg_next::codec::decoder::find(codec_ctx.id())
+            .map(|codec| {
+                let caps = codec.capabilities();
+                if caps.contains(ffmpeg_next::codec::capabilities::Capabilities::FRAME_THREADS) {
+                    ffmpeg_next::codec::threading::Type::Frame
+                } else if caps
+                    .contains(ffmpeg_next::codec::capabilities::Capabilities::SLICE_THREADS)
+                {
+                    ffmpeg_next::codec::threading::Type::Slice
+                } else {
+                    ffmpeg_next::codec::threading::Type::None
+                }
+            })
+            .unwrap_or(ffmpeg_next::codec::threading::Type::None);
+        tracing::info!(
+            "Using {:?} threading for video stream {}",
+            threading_kind,
+            stream_index
+        );
+        codec_ctx.set_threading(ffmpeg_next::codec::threading::Config {
+            kind: threading_kind,
+            count: 0,
+        });
         let decoder = codec_ctx.decoder().video()?;
         Ok(Self {
             input,

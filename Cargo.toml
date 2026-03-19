@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 [dependencies]
 anyhow = "1.0.102"
 aviutl2 = "0.21.0"
-ffmpeg-next = "8.1.0"
+ffmpeg-next = { version = "8.1.0" }
 ordered-float = "5.1.0"
 process_path = "0.1.4"
 rayon = "1.11.0"
