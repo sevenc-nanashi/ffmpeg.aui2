@@ -68,7 +68,8 @@ fn run_prefetch_thread(
             .get(current)
             .map(|e| e.timestamp)
             .unwrap_or(0.0);
-        let end_ts = start_ts + 1.0;
+        const PREFETCH_DURATION: f64 = 0.1;
+        let end_ts = start_ts + PREFETCH_DURATION;
         let next_frame = current + 1;
 
         for (i, entry) in cfg.video_index[next_frame.min(cfg.video_index.len())..]

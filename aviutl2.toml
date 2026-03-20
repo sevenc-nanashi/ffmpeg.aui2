@@ -11,7 +11,7 @@ aviutl2_version = "latest"
 catalog_dependencies = ["Mr-Ojii.L-SMASH-Works"]
 
 [preview]
-catalog_dependencies = ["Mr-Ojii.L-SMASH-Works"]
+catalog_dependencies = ["Mr-Ojii.L-SMASH-Works", "sevenc-nanashi.aviutl2-rs.rusty_statistics"]
 
 [artifacts.ffmpeg_aui2-aui2]
 destination = "Plugin/ffmpeg_aui2.aui2"
