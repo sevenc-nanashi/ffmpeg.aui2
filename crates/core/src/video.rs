@@ -4,6 +4,7 @@ pub struct VideoDecoderState {
     pub input: ffmpeg_next::format::context::Input,
     pub decoder: ffmpeg_next::decoder::Video,
     pub scaler: Option<ffmpeg_next::software::scaling::Context>,
+    pub filter_graph: Option<ffmpeg_next::filter::Graph>,
     pub stream_index: usize,
     pub time_base: ffmpeg_next::Rational,
     pub current_ts: f64,
@@ -44,6 +45,7 @@ impl VideoDecoderState {
             input,
             decoder,
             scaler: None,
+            filter_graph: None,
             stream_index,
             time_base,
             current_ts: f64::NEG_INFINITY,
@@ -129,18 +131,83 @@ impl VideoDecoderState {
         Ok(())
     }
 
-    /// Decode frame → scale → return pixel bytes. Does NOT touch prefetch.
+    fn ensure_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
+        if self.filter_graph.is_some() {
+            return Ok(());
+        }
+
+        let args = format!(
+            "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect=1/1",
+            frame.width(),
+            frame.height(),
+            ffmpeg_next::ffi::AVPixelFormat::from(frame.format()) as i32,
+            self.time_base.numerator(),
+            self.time_base.denominator(),
+        );
+
+        let mut graph = ffmpeg_next::filter::Graph::new();
+        graph.add(
+            &ffmpeg_next::filter::find("buffer").context("buffer filter not found")?,
+            "in",
+            &args,
+        )?;
+        graph.add(
+            &ffmpeg_next::filter::find("buffersink").context("buffersink filter not found")?,
+            "out",
+            "",
+        )?;
+        graph.output("in", 0)?.input("out", 0)?.parse("vflip")?;
+        graph.validate()?;
+
+        self.filter_graph = Some(graph);
+        Ok(())
+    }
+
+    fn apply_vflip(
+        &mut self,
+        frame: &ffmpeg_next::frame::Video,
+    ) -> anyhow::Result<ffmpeg_next::frame::Video> {
+        self.ensure_filter(frame)?;
+        let graph = self.filter_graph.as_mut().unwrap();
+
+        graph
+            .get("in")
+            .unwrap()
+            .source()
+            .add(frame)
+            .context("Failed to add frame to filter graph")?;
+
+        let mut output = ffmpeg_next::frame::Video::empty();
+        graph
+            .get("out")
+            .unwrap()
+            .sink()
+            .frame(&mut output)
+            .context("Failed to get frame from filter graph")?;
+
+        Ok(output)
+    }
+
+    /// Decode frame → (optionally vflip via avfilter) → scale → return pixel bytes. Does NOT touch prefetch.
     pub fn frame_to_bytes(
         &mut self,
         frame: &ffmpeg_next::frame::Video,
         is_yuv422: bool,
     ) -> anyhow::Result<Vec<u8>> {
         self.ensure_scaler(is_yuv422)?;
-        let scaler = self.scaler.as_mut().unwrap();
 
+        let flipped;
+        let frame_to_scale = if !is_yuv422 {
+            flipped = self.apply_vflip(frame)?;
+            &flipped
+        } else {
+            frame
+        };
+
+        let scaler = self.scaler.as_mut().unwrap();
         let mut scaled = ffmpeg_next::frame::Video::empty();
         scaler
-            .run(frame, &mut scaled)
+            .run(frame_to_scale, &mut scaled)
             .context("Failed to scale frame")?;
 
         let w = scaled.width() as usize;
@@ -162,12 +229,16 @@ impl VideoDecoderState {
             Ok(packed)
         } else {
             let bpr = w * 4;
-            let mut flipped = vec![0u8; h * bpr];
-            flipped.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
-                let src = (h - 1 - y) * stride;
-                dst.copy_from_slice(&data[src..src + bpr]);
-            });
-            Ok(flipped)
+            let mut output = vec![0u8; h * bpr];
+            if stride == bpr {
+                output.copy_from_slice(&data[..h * bpr]);
+            } else {
+                output.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
+                    let src = y * stride;
+                    dst.copy_from_slice(&data[src..src + bpr]);
+                });
+            }
+            Ok(output)
         }
     }
 }
