@@ -21,8 +21,8 @@ fn try_initialize_core_handle() -> anyhow::Result<()> {
             "avcodec-62.dll",
             "avformat-62.dll",
             "swscale-9.dll",
-						"avfilter-11.dll",
-						"avdevice-62.dll",
+            "avfilter-11.dll",
+            "avdevice-62.dll",
         ];
         for dep in &dependency_paths {
             let dep_path = get_dependency_dir().join("dependencies").join(dep);
@@ -49,7 +49,9 @@ fn initialize_core_handle() {
         Ok(_) => (),
         Err(e) => native_dialog::DialogBuilder::message()
             .set_title("ffmpeg.aui2")
-            .set_text(format!("Failed to initialize core library: {e}\n\nPlease try reinstalling the plugin."))
+            .set_text(format!(
+                "Failed to initialize core library: {e}\n\nPlease try reinstalling the plugin."
+            ))
             .set_level(native_dialog::MessageLevel::Error)
             .alert()
             .show()
