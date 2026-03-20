@@ -1,5 +1,4 @@
 use anyhow::Context;
-use rayon::prelude::*;
 
 pub struct VideoDecoderState {
     pub input: ffmpeg_next::format::context::Input,
@@ -155,21 +154,19 @@ impl VideoDecoderState {
             if stride == bpr {
                 packed.copy_from_slice(&data[..h * bpr]);
             } else {
-                packed.par_chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
-                    dst.copy_from_slice(&data[y * stride..y * stride + bpr]);
+                packed.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
+                    let src = y * stride;
+                    dst.copy_from_slice(&data[src..src + bpr]);
                 });
             }
             Ok(packed)
         } else {
             let bpr = w * 4;
             let mut flipped = vec![0u8; h * bpr];
-            flipped
-                .par_chunks_mut(bpr)
-                .enumerate()
-                .for_each(|(y, dst)| {
-                    let src = (h - 1 - y) * stride;
-                    dst.copy_from_slice(&data[src..src + bpr]);
-                });
+            flipped.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
+                let src = (h - 1 - y) * stride;
+                dst.copy_from_slice(&data[src..src + bpr]);
+            });
             Ok(flipped)
         }
     }
