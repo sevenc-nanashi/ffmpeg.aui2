@@ -6,6 +6,9 @@ id = "sevenc-nanashi.ffmpeg-aui2"
 name = "ffmpeg.aui2"
 version = "0.1.0"
 
+[build_group]
+download_ffmpeg = "ruby download_ffmpeg.rb"
+
 [development]
 aviutl2_version = "latest"
 catalog_dependencies = ["Mr-Ojii.L-SMASH-Works"]
@@ -40,30 +43,36 @@ source = "target/release/ffmpeg_aui2.dll"
 
 # TODO: aviutl2-cliにglobコピーを実装する
 [artifacts.dependencies_avcodec-62]
+build = { group = "download_ffmpeg" }
 destination = "Plugin/ffmpeg-aui2/dependencies/avcodec-62.dll"
-# TODO: ちゃんとダウンローダーを作る
-source = "./__gi_ffmpeg/bin/avcodec-62.dll"
+source = "./ffmpeg/bin/avcodec-62.dll"
 
 [artifacts.dependencies_avformat-62]
+build = { group = "download_ffmpeg" }
 destination = "Plugin/ffmpeg-aui2/dependencies/avformat-62.dll"
-source = "./__gi_ffmpeg/bin/avformat-62.dll"
+source = "./ffmpeg/bin/avformat-62.dll"
 
 [artifacts.dependencies_avfilter-11]
+build = { group = "download_ffmpeg" }
 destination = "Plugin/ffmpeg-aui2/dependencies/avfilter-11.dll"
-source = "./__gi_ffmpeg/bin/avfilter-11.dll"
+source = "./ffmpeg/bin/avfilter-11.dll"
 
 [artifacts.dependencies_avdevice-62]
+build = { group = "download_ffmpeg" }
 destination = "Plugin/ffmpeg-aui2/dependencies/avdevice-62.dll"
-source = "./__gi_ffmpeg/bin/avdevice-62.dll"
+source = "./ffmpeg/bin/avdevice-62.dll"
 
 [artifacts.dependencies_avutil-60]
+build = { group = "download_ffmpeg" }
 destination = "Plugin/ffmpeg-aui2/dependencies/avutil-60.dll"
-source = "./__gi_ffmpeg/bin/avutil-60.dll"
+source = "./ffmpeg/bin/avutil-60.dll"
 
 [artifacts.dependencies_swscale-9]
+build = { group = "download_ffmpeg" }
 destination = "Plugin/ffmpeg-aui2/dependencies/swscale-9.dll"
-source = "./__gi_ffmpeg/bin/swscale-9.dll"
+source = "./ffmpeg/bin/swscale-9.dll"
 
 [artifacts.dependencies_swresample-6]
+build = { group = "download_ffmpeg" }
 destination = "Plugin/ffmpeg-aui2/dependencies/swresample-6.dll"
-source = "./__gi_ffmpeg/bin/swresample-6.dll"
+source = "./ffmpeg/bin/swresample-6.dll"
