@@ -1,11 +1,13 @@
 mod audio;
 mod index;
+mod prefetch;
 mod video;
 use std::hash::Hasher;
+use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use audio::AudioDecoderState;
-use rayon::prelude::*;
+use prefetch::{PrefetchConfig, PrefetchHandle};
 use video::VideoDecoderState;
 
 #[aviutl2::plugin(InputPlugin)]
@@ -20,6 +22,7 @@ struct FfmpegAui2InputHandle {
     current_audio_track: Option<index::AudioTrackInfo>,
     video_decoder: std::sync::Mutex<Option<VideoDecoderState>>,
     audio_decoder: std::sync::Mutex<Option<AudioDecoderState>>,
+    prefetch: PrefetchHandle,
 }
 unsafe impl Send for FfmpegAui2InputHandle {}
 unsafe impl Sync for FfmpegAui2InputHandle {}
@@ -36,11 +39,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
     fn new(_info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
         ffmpeg_next::init()?;
         aviutl2::tracing_subscriber::fmt()
-            .with_max_level(if cfg!(debug_assertions) {
-                tracing::Level::DEBUG
-            } else {
-                tracing::Level::INFO
-            })
+            .with_max_level(tracing::Level::DEBUG)
             .event_format(aviutl2::logger::AviUtl2Formatter)
             .with_writer(aviutl2::logger::AviUtl2LogWriter)
             .init();
@@ -75,7 +74,6 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             let index_header_file = std::fs::read(&index_header_path).with_context(|| {
                 format!("Failed to open index header file: {:?}", index_header_path)
             })?;
-            // Header presence and successful deserialization = index is complete
             rkyv::from_bytes::<index::IndexHeaderFile, rkyv::rancor::Error>(&index_header_file)
                 .is_err()
         } else {
@@ -110,6 +108,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         );
 
         Ok(FfmpegAui2InputHandle {
+            prefetch: PrefetchHandle::new(file.clone()),
             path: file,
             index,
             video_index: vec![],
@@ -150,6 +149,10 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                     .filter(|e| e.stream_index() == v.stream_index)
                     .filter_map(|e| e.as_video().cloned())
                     .collect();
+                // Sort by PTS (display order) — packet order is DTS which differs for B-frames
+                handle
+                    .video_index
+                    .sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
 
                 // Invalidate cached decoder if stream changed
                 let mut vd = handle.video_decoder.lock().unwrap();
@@ -182,6 +185,15 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         } else {
             None
         };
+
+        // Update prefetch config whenever video track changes
+        *handle.prefetch.config.write().unwrap() =
+            handle.current_video_track.as_ref().map(|v| PrefetchConfig {
+                video_index: std::sync::Arc::new(handle.video_index.clone()),
+                is_yuv422: v.is_yuv422,
+            });
+        handle.prefetch.cache.clear();
+
         let audio = if let Some(a) = handle.index.audio_tracks().nth(audio_track as usize) {
             if a.duration <= 0.0 || a.samples == 0 {
                 tracing::warn!(
@@ -257,9 +269,10 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         frame: u32,
         returner: &mut aviutl2::input::ImageReturner,
     ) -> anyhow::Result<()> {
+        let frame = frame as usize;
         let entry = handle
             .video_index
-            .get(frame as usize)
+            .get(frame)
             .ok_or_else(|| anyhow::anyhow!("Frame {} out of range", frame))?
             .clone();
 
@@ -268,69 +281,40 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Video track info not set"))?;
 
+        let is_yuv422 = video_track.is_yuv422;
         let stream_index = entry.stream_index;
         let target_ts = entry.timestamp;
 
-        let mut state_guard = handle.video_decoder.lock().unwrap();
+        // Update current position and wake prefetch thread
+        handle.prefetch.position.store(frame, Ordering::Relaxed);
+        let _ = handle.prefetch.tx.send(());
 
-        // Initialize decoder if needed
+        // Check prefetch cache
+        if let Some((_, data)) = handle.prefetch.cache.remove(&frame) {
+            handle.prefetch.cache.retain(|&k, _| k > frame);
+            returner.write(&data);
+            return Ok(());
+        }
+
+        // Decode with the main decoder
+        let mut state_guard = handle.video_decoder.lock().unwrap();
         if state_guard
             .as_ref()
             .is_none_or(|s| s.stream_index != stream_index)
         {
             *state_guard = Some(VideoDecoderState::new(&handle.path, stream_index)?);
         }
-
         let state = state_guard.as_mut().unwrap();
 
-        // Seek backward if needed
         if target_ts < state.current_ts - 1e-6 {
             state.seek(entry.last_keyframe_timestamp);
         }
 
         let video_frame = state.decode_to(target_ts)?;
+        let pixel_data = state.frame_to_bytes(&video_frame, is_yuv422)?;
+        drop(state_guard);
 
-        state.ensure_scaler()?;
-        let scaler = state.scaler.as_mut().unwrap();
-
-        let mut rgba_frame = ffmpeg_next::frame::Video::empty();
-        scaler
-            .run(&video_frame, &mut rgba_frame)
-            .context("Failed to scale frame")?;
-
-        let w = rgba_frame.width() as usize;
-        let h = rgba_frame.height() as usize;
-
-        let data = rgba_frame.data(0);
-        let stride = rgba_frame.stride(0);
-
-        if video_track.is_yuv422 {
-            if stride == w * 2 {
-                // Fast path: stride is exactly the width of YUY2 data, so we can copy directly
-                returner.write(&data);
-            } else {
-                // Stride is larger than width, so we need to copy line by line
-                let mut packed = vec![0u8; h * w * 2];
-                for y in 0..h {
-                    let src_offset = y * stride;
-                    let dst_offset = y * w * 2;
-                    packed[dst_offset..dst_offset + w * 2]
-                        .copy_from_slice(&data[src_offset..src_offset + w * 2]);
-                }
-                returner.write(&packed);
-            }
-        } else {
-            // BGRA, but AviUtl2 wants bottom-up data for BGRA, so we need to flip vertically
-            let mut flipped = vec![0u8; h * w * 4];
-            for y in 0..h {
-                let src_offset = (h - 1 - y) * stride;
-                let dst_offset = y * w * 4;
-                flipped[dst_offset..dst_offset + w * 4]
-                    .copy_from_slice(&data[src_offset..src_offset + w * 4]);
-            }
-
-            returner.write(&flipped);
-        }
+        returner.write(&pixel_data);
         Ok(())
     }
 
@@ -359,7 +343,6 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
 
         let mut state_guard = handle.audio_decoder.lock().unwrap();
 
-        // Initialize decoder if needed
         if state_guard
             .as_ref()
             .is_none_or(|s| s.stream_index != stream_index)
@@ -377,7 +360,6 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
 
         let state = state_guard.as_mut().unwrap();
 
-        // Seek if requested range starts before the buffer
         if start_idx < state.buffer_start {
             let start_time = start_idx as f64 / sample_rate as f64;
             let seek_pos = handle
@@ -387,17 +369,14 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             state.seek(seek_ts);
         }
 
-        // Trim buffer samples before start_idx to save memory
         if start_idx > state.buffer_start {
             let trim = ((start_idx - state.buffer_start) * channels).min(state.buffer.len());
             state.buffer.drain(..trim);
             state.buffer_start = start_idx;
         }
 
-        // Decode until buffer covers the requested range
         state.fill_until(end_idx)?;
 
-        // Copy from buffer into output
         let buf_offset = (start_idx - state.buffer_start) * channels;
         let needed = length * channels;
         let available = state.buffer.len().saturating_sub(buf_offset);

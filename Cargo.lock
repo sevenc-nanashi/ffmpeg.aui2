@@ -285,6 +285,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aviutl2",
+ "dashmap",
  "ffmpeg-next",
  "ordered-float",
  "process_path",

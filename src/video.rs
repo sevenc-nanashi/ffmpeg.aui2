@@ -1,4 +1,5 @@
 use anyhow::Context;
+use rayon::prelude::*;
 
 pub struct VideoDecoderState {
     pub input: ffmpeg_next::format::context::Input,
@@ -18,20 +19,18 @@ impl VideoDecoderState {
             .time_base();
         let codec_params = input.stream(stream_index).unwrap().parameters();
         let mut codec_ctx = ffmpeg_next::codec::context::Context::from_parameters(codec_params)?;
-        let threading_kind = ffmpeg_next::codec::decoder::find(codec_ctx.id())
-            .map(|codec| {
-                let caps = codec.capabilities();
-                if caps.contains(ffmpeg_next::codec::capabilities::Capabilities::FRAME_THREADS) {
-                    ffmpeg_next::codec::threading::Type::Frame
-                } else if caps
-                    .contains(ffmpeg_next::codec::capabilities::Capabilities::SLICE_THREADS)
-                {
-                    ffmpeg_next::codec::threading::Type::Slice
-                } else {
-                    ffmpeg_next::codec::threading::Type::None
-                }
-            })
-            .unwrap_or(ffmpeg_next::codec::threading::Type::None);
+        let codec = ffmpeg_next::codec::decoder::find(codec_ctx.id()).ok_or_else(|| {
+            anyhow::anyhow!("Unsupported codec for video stream {}", stream_index)
+        })?;
+        let caps = codec.capabilities();
+        let threading_kind =
+            if caps.contains(ffmpeg_next::codec::capabilities::Capabilities::FRAME_THREADS) {
+                ffmpeg_next::codec::threading::Type::Frame
+            } else if caps.contains(ffmpeg_next::codec::capabilities::Capabilities::SLICE_THREADS) {
+                ffmpeg_next::codec::threading::Type::Slice
+            } else {
+                ffmpeg_next::codec::threading::Type::None
+            };
         tracing::info!(
             "Using {:?} threading for video stream {}",
             threading_kind,
@@ -106,16 +105,21 @@ impl VideoDecoderState {
         Ok(frame)
     }
 
-    pub fn ensure_scaler(&mut self) -> anyhow::Result<()> {
+    pub fn ensure_scaler(&mut self, is_yuv422: bool) -> anyhow::Result<()> {
         if self.scaler.is_none() {
             let width = self.decoder.width();
             let height = self.decoder.height();
+            let dst_fmt = if is_yuv422 {
+                ffmpeg_next::format::Pixel::YUYV422
+            } else {
+                ffmpeg_next::format::Pixel::BGRA
+            };
             self.scaler = Some(
                 ffmpeg_next::software::scaling::Context::get(
                     self.decoder.format(),
                     width,
                     height,
-                    ffmpeg_next::format::Pixel::BGRA,
+                    dst_fmt,
                     width,
                     height,
                     ffmpeg_next::software::scaling::Flags::BILINEAR,
@@ -124,5 +128,49 @@ impl VideoDecoderState {
             );
         }
         Ok(())
+    }
+
+    /// Decode frame → scale → return pixel bytes. Does NOT touch prefetch.
+    pub fn frame_to_bytes(
+        &mut self,
+        frame: &ffmpeg_next::frame::Video,
+        is_yuv422: bool,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.ensure_scaler(is_yuv422)?;
+        let scaler = self.scaler.as_mut().unwrap();
+
+        let mut scaled = ffmpeg_next::frame::Video::empty();
+        scaler
+            .run(frame, &mut scaled)
+            .context("Failed to scale frame")?;
+
+        let w = scaled.width() as usize;
+        let h = scaled.height() as usize;
+        let data = scaled.data(0);
+        let stride = scaled.stride(0);
+
+        if is_yuv422 {
+            let bpr = w * 2;
+            let mut packed = vec![0u8; h * bpr];
+            if stride == bpr {
+                packed.copy_from_slice(&data[..h * bpr]);
+            } else {
+                packed.par_chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
+                    dst.copy_from_slice(&data[y * stride..y * stride + bpr]);
+                });
+            }
+            Ok(packed)
+        } else {
+            let bpr = w * 4;
+            let mut flipped = vec![0u8; h * bpr];
+            flipped
+                .par_chunks_mut(bpr)
+                .enumerate()
+                .for_each(|(y, dst)| {
+                    let src = (h - 1 - y) * stride;
+                    dst.copy_from_slice(&data[src..src + bpr]);
+                });
+            Ok(flipped)
+        }
     }
 }
