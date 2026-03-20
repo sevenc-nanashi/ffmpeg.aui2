@@ -30,13 +30,13 @@ unsafe impl Sync for FfmpegAui2InputHandle {}
 fn index_dir() -> std::path::PathBuf {
     process_path::get_dylib_path()
         .unwrap()
-        .with_file_name("ffmpeg.aui2.index")
+        .with_file_name("index")
 }
 
 impl aviutl2::input::InputPlugin for FfmpegAui2 {
     type InputHandle = FfmpegAui2InputHandle;
 
-    fn new(_info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
+    fn new(info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
         ffmpeg_next::init()?;
         aviutl2::tracing_subscriber::fmt()
             // .with_max_level(tracing::Level::DEBUG)
@@ -48,6 +48,67 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             .event_format(aviutl2::logger::AviUtl2Formatter)
             .with_writer(aviutl2::logger::AviUtl2LogWriter)
             .init();
+        tracing::info!("ffmpeg.aui2 plugin initialized");
+        tracing::info!("AviUtl2 version: {}", info.version);
+        tracing::info!("Index directory: {:?}", index_dir());
+        tracing::info!("Build timestamp: {}", env!("VERGEN_BUILD_TIMESTAMP"));
+        tracing::info!("Build nonce: {:016x}", *index::VERSION_NONCE);
+        tracing::info!(
+            "ffmpeg codec configuration: {:?}",
+            ffmpeg_next::codec::configuration()
+        );
+        tracing::info!(
+            "ffmpeg device configuration: {:?}",
+            ffmpeg_next::device::configuration()
+        );
+        tracing::info!(
+            "ffmpeg filter configuration: {:?}",
+            ffmpeg_next::filter::configuration()
+        );
+        tracing::info!(
+            "ffmpeg format configuration: {:?}",
+            ffmpeg_next::format::configuration()
+        );
+        tracing::info!(
+            "ffmpeg util configuration: {:?}",
+            ffmpeg_next::util::configuration()
+        );
+        tracing::info!(
+            "ffmpeg swscale configuration: {:?}",
+            ffmpeg_next::software::scaling::configuration()
+        );
+        tracing::info!(
+            "ffmpeg swresample configuration: {:?}",
+            ffmpeg_next::software::resampling::configuration()
+        );
+        tracing::info!(
+            "ffmpeg codec version: {}",
+            format_ffmpeg_version(ffmpeg_next::codec::version())
+        );
+        tracing::info!(
+            "ffmpeg device version: {}",
+            format_ffmpeg_version(ffmpeg_next::device::version())
+        );
+        tracing::info!(
+            "ffmpeg filter version: {}",
+            format_ffmpeg_version(ffmpeg_next::filter::version())
+        );
+        tracing::info!(
+            "ffmpeg format version: {}",
+            format_ffmpeg_version(ffmpeg_next::format::version())
+        );
+        tracing::info!(
+            "ffmpeg util version: {}",
+            format_ffmpeg_version(ffmpeg_next::util::version())
+        );
+        tracing::info!(
+            "ffmpeg swscale version: {}",
+            format_ffmpeg_version(ffmpeg_next::software::scaling::version())
+        );
+        tracing::info!(
+            "ffmpeg swresample version: {}",
+            format_ffmpeg_version(ffmpeg_next::software::resampling::version())
+        );
         Ok(Self {})
     }
 
@@ -79,8 +140,34 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             let index_header_file = std::fs::read(&index_header_path).with_context(|| {
                 format!("Failed to open index header file: {:?}", index_header_path)
             })?;
-            rkyv::from_bytes::<index::IndexHeaderFile, rkyv::rancor::Error>(&index_header_file)
-                .is_err()
+            match rkyv::from_bytes::<index::IndexHeaderFile, rkyv::rancor::Error>(
+                &index_header_file,
+            ) {
+                Ok(header) => {
+                    if header.filehash == hash && header.version_nonce == *index::VERSION_NONCE {
+                        tracing::info!("Index header valid for file: {:?}. Loading index.", file);
+                        false
+                    } else {
+                        tracing::warn!(
+                            "Index header mismatch for file: {:?}. Expected hash: {:016x}, version nonce: {:016x}. Found hash: {:016x}, version nonce: {:016x}. Recreating index.",
+                            file,
+                            hash,
+                            *index::VERSION_NONCE,
+                            header.filehash,
+                            header.version_nonce,
+                        );
+                        true
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to deserialize index header for file: {:?}. Error: {}. Recreating index.",
+                        file,
+                        e
+                    );
+                    true
+                }
+            }
         } else {
             true
         };
@@ -315,7 +402,9 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         }
         let state = state_guard.as_mut().unwrap();
 
-        if target_ts < state.current_ts - 1e-6 {
+        if target_ts < state.current_ts - 1e-6
+            || entry.last_keyframe_timestamp > state.current_ts + 1e-6
+        {
             state.seek(entry.last_keyframe_timestamp);
         }
 
@@ -369,16 +458,16 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
 
         let state = state_guard.as_mut().unwrap();
 
-        if start_idx < state.buffer_start {
+        let buffer_end_sample = state.buffer_start + state.buffer.len() / channels;
+        let seek_threshold = sample_rate as usize; // 1秒分
+        if start_idx < state.buffer_start || start_idx > buffer_end_sample + seek_threshold {
             let start_time = start_idx as f64 / sample_rate as f64;
             let seek_pos = handle
                 .audio_index
                 .partition_point(|e| e.timestamp < start_time);
             let seek_ts = handle.audio_index[seek_pos.saturating_sub(1)].timestamp;
             state.seek(seek_ts);
-        }
-
-        if start_idx > state.buffer_start {
+        } else if start_idx > state.buffer_start {
             let trim = ((start_idx - state.buffer_start) * channels).min(state.buffer.len());
             state.buffer.drain(..trim);
             state.buffer_start = start_idx;
@@ -397,6 +486,13 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         returner.write(&output);
         Ok(())
     }
+}
+
+fn format_ffmpeg_version(version: u32) -> String {
+    let major = version >> 16;
+    let minor = (version >> 8) & 0xFF;
+    let patch = version & 0xFF;
+    format!("{}.{}.{}", major, minor, patch)
 }
 
 aviutl2::register_input_plugin!(FfmpegAui2);

@@ -1,9 +1,17 @@
 use anyhow::Context;
 
+pub static VERSION_NONCE: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+    let timestamp = env!("VERGEN_BUILD_TIMESTAMP");
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    hasher.update(timestamp.as_bytes());
+    hasher.digest()
+});
+
 #[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct IndexHeaderFile {
     pub filename: String,
     pub filehash: u64,
+    pub version_nonce: u64,
 }
 
 #[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
@@ -260,7 +268,11 @@ pub fn create_index(
     std::fs::write(content_path, &*index_bytes).context("Failed to write index file")?;
 
     // Update header with done=true
-    let final_header = IndexHeaderFile { filename, filehash };
+    let final_header = IndexHeaderFile {
+        filename,
+        filehash,
+        version_nonce: *VERSION_NONCE,
+    };
     let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&final_header)
         .context("Failed to serialize final index header")?;
     std::fs::write(header_path, &*header_bytes).context("Failed to write final index header")?;
