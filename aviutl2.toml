@@ -11,16 +11,59 @@ aviutl2_version = "latest"
 catalog_dependencies = ["Mr-Ojii.L-SMASH-Works"]
 
 [preview]
-catalog_dependencies = ["Mr-Ojii.L-SMASH-Works", "sevenc-nanashi.aviutl2-rs.rusty_statistics"]
+catalog_dependencies = [
+  "Mr-Ojii.L-SMASH-Works",
+  "sevenc-nanashi.aviutl2-rs.rusty_statistics"
+]
 
-[artifacts.ffmpeg_aui2-aui2]
-destination = "Plugin/ffmpeg_aui2.aui2"
+[artifacts.bootstrapper]
+destination = "Plugin/ffmpeg-aui2/ffmpeg.aui2"
 
-[artifacts.ffmpeg_aui2-aui2.profiles.debug]
+[artifacts.bootstrapper.profiles.debug]
+build = "cargo build"
+source = "target/debug/ffmpeg_aui2_bootstrapper.dll"
+
+[artifacts.bootstrapper.profiles.release]
+build = "cargo build --release"
+source = "target/release/ffmpeg_aui2_bootstrapper.dll"
+
+[artifacts.core]
+destination = "Plugin/ffmpeg-aui2/ffmpeg_aui2_core.dll"
+
+[artifacts.core.profiles.debug]
 build = "cargo build"
 source = "target/debug/ffmpeg_aui2.dll"
 
-[artifacts.ffmpeg_aui2-aui2.profiles.release]
+[artifacts.core.profiles.release]
 build = "cargo build --release"
 source = "target/release/ffmpeg_aui2.dll"
 
+# TODO: aviutl2-cliにglobコピーを実装する
+[artifacts.dependencies_avcodec-62]
+destination = "Plugin/ffmpeg-aui2/dependencies/avcodec-62.dll"
+# TODO: ちゃんとダウンローダーを作る
+source = "./__gi_ffmpeg/bin/avcodec-62.dll"
+
+[artifacts.dependencies_avformat-62]
+destination = "Plugin/ffmpeg-aui2/dependencies/avformat-62.dll"
+source = "./__gi_ffmpeg/bin/avformat-62.dll"
+
+[artifacts.dependencies_avfilter-11]
+destination = "Plugin/ffmpeg-aui2/dependencies/avfilter-11.dll"
+source = "./__gi_ffmpeg/bin/avfilter-11.dll"
+
+[artifacts.dependencies_avdevice-62]
+destination = "Plugin/ffmpeg-aui2/dependencies/avdevice-62.dll"
+source = "./__gi_ffmpeg/bin/avdevice-62.dll"
+
+[artifacts.dependencies_avutil-60]
+destination = "Plugin/ffmpeg-aui2/dependencies/avutil-60.dll"
+source = "./__gi_ffmpeg/bin/avutil-60.dll"
+
+[artifacts.dependencies_swscale-9]
+destination = "Plugin/ffmpeg-aui2/dependencies/swscale-9.dll"
+source = "./__gi_ffmpeg/bin/swscale-9.dll"
+
+[artifacts.dependencies_swresample-6]
+destination = "Plugin/ffmpeg-aui2/dependencies/swresample-6.dll"
+source = "./__gi_ffmpeg/bin/swresample-6.dll"

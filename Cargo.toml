@@ -1,23 +1,6 @@
-[package]
-name = "ffmpeg-aui2"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-anyhow = "1.0.102"
-aviutl2 = "0.21.0"
-dashmap = "6.1.0"
-ffmpeg-next = { version = "8.1.0" }
-ordered-float = "5.1.0"
-process_path = "0.1.4"
-rayon = "1.11.0"
-rkyv = "0.8.15"
-tracing = "0.1.44"
-xxhash-rust = { version = "0.8.15", features = ["std", "xxh3"] }
-zerocopy = "0.8.42"
+[workspace]
+resolver = "3"
+members = ["./crates/*"]
 
 [profile.release]
 debug = true

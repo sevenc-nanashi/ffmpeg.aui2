@@ -39,7 +39,12 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
     fn new(_info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
         ffmpeg_next::init()?;
         aviutl2::tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
+            // .with_max_level(tracing::Level::DEBUG)
+            .with_max_level(if cfg!(debug_assertions) {
+                tracing::Level::DEBUG
+            } else {
+                tracing::Level::INFO
+            })
             .event_format(aviutl2::logger::AviUtl2Formatter)
             .with_writer(aviutl2::logger::AviUtl2LogWriter)
             .init();
@@ -82,8 +87,12 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
 
         let index = if should_create_index {
             tracing::info!("Creating index for file: {:?}", file);
-            index::create_index(&file, &index_header_path, &index_path, hash)
-                .with_context(|| format!("Failed to create index for file: {:?}", file))?
+            let start_time = std::time::Instant::now();
+            let index = index::create_index(&file, &index_header_path, &index_path, hash)
+                .with_context(|| format!("Failed to create index for file: {:?}", file))?;
+            let elapsed = start_time.elapsed();
+            tracing::info!("Index created in {:.2?}", elapsed,);
+            index
         } else {
             tracing::info!("Loading existing index for file: {:?}", file);
             let index_file = std::fs::read(&index_path)
