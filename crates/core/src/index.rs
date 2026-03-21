@@ -54,7 +54,7 @@ pub struct VideoTrackInfo {
     pub height: u32,
     pub frames: u64,
     pub duration: f64,
-    pub is_yuv422: bool,
+    pub convert_to_yuv422: bool,
 }
 #[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct AudioTrackInfo {
@@ -156,9 +156,33 @@ pub fn create_index(
                     height: video.height(),
                     frames: stream.frames().max(0) as u64,
                     duration: (stream.duration() as f64) * f64::from(stream.time_base()),
-                    is_yuv422: matches!(
+                    // YUVっぽいフォーマットはYUV422に変換して扱うようにする（そのほうが速い）
+                    convert_to_yuv422: matches!(
                         video.format(),
-                        ffmpeg_next::format::Pixel::YUV422P | ffmpeg_next::format::Pixel::YUYV422 | ffmpeg_next::format::Pixel::YUV420P
+                        ffmpeg_next::format::Pixel::YUV422P
+                        | ffmpeg_next::format::Pixel::YUYV422
+                        | ffmpeg_next::format::Pixel::UYVY422
+                        | ffmpeg_next::format::Pixel::YUV422P10
+                        | ffmpeg_next::format::Pixel::YUV422P12
+                        | ffmpeg_next::format::Pixel::YUV422P16
+                        | ffmpeg_next::format::Pixel::YUV422P9
+                        | ffmpeg_next::format::Pixel::YUV422P14
+                        | ffmpeg_next::format::Pixel::YUV420P
+                        | ffmpeg_next::format::Pixel::YUV420P10
+                        | ffmpeg_next::format::Pixel::YUV420P12
+                        | ffmpeg_next::format::Pixel::YUV420P16
+                        | ffmpeg_next::format::Pixel::YUV420P9
+                        | ffmpeg_next::format::Pixel::YUV420P14
+                        | ffmpeg_next::format::Pixel::YUV422P16BE
+                        | ffmpeg_next::format::Pixel::YUV422P16LE
+                        | ffmpeg_next::format::Pixel::YUV422P10BE
+                        | ffmpeg_next::format::Pixel::YUV422P10LE
+                        | ffmpeg_next::format::Pixel::YUV422P12BE
+                        | ffmpeg_next::format::Pixel::YUV422P12LE
+                        | ffmpeg_next::format::Pixel::YUV422P14BE
+                        | ffmpeg_next::format::Pixel::YUV422P14LE
+                        | ffmpeg_next::format::Pixel::YUV422P9BE
+                        | ffmpeg_next::format::Pixel::YUV422P9LE
                     ),
                 }))
             }
