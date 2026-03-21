@@ -158,7 +158,7 @@ pub fn create_index(
                     duration: (stream.duration() as f64) * f64::from(stream.time_base()),
                     is_yuv422: matches!(
                         video.format(),
-                        ffmpeg_next::format::Pixel::YUV422P | ffmpeg_next::format::Pixel::YUYV422
+                        ffmpeg_next::format::Pixel::YUV422P | ffmpeg_next::format::Pixel::YUYV422 | ffmpeg_next::format::Pixel::YUV420P
                     ),
                 }))
             }

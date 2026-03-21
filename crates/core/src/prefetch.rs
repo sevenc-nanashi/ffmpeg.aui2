@@ -51,9 +51,9 @@ fn run_prefetch_thread(
     let mut decoder: Option<VideoDecoderState> = None;
 
     loop {
-        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+        match rx.try_recv() {
+            Ok(()) | Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
         }
         while rx.try_recv().is_ok() {}
 
@@ -62,7 +62,7 @@ fn run_prefetch_thread(
             None => continue,
         };
 
-        let current = position.load(Ordering::Relaxed);
+        let mut current = position.load(Ordering::Relaxed);
         let start_ts = cfg
             .video_index
             .get(current)
@@ -76,8 +76,17 @@ fn run_prefetch_thread(
             .iter()
             .enumerate()
         {
-            if position.load(Ordering::Relaxed) != current {
-                break;
+            let new_current = position.load(Ordering::Relaxed);
+            if new_current != current {
+                let new_ts = cfg
+                    .video_index
+                    .get(new_current)
+                    .map(|e| e.timestamp)
+                    .unwrap_or(f64::MAX);
+                if new_ts > end_ts {
+                    break;
+                }
+                current = new_current;
             }
             if entry.timestamp > end_ts {
                 break;
