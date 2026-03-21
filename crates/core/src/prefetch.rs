@@ -6,7 +6,7 @@ use crate::video::VideoDecoderState;
 #[derive(Clone)]
 pub struct PrefetchConfig {
     pub video_index: std::sync::Arc<Vec<index::VideoEntry>>,
-    pub is_yuv422: bool,
+    pub convert_to_yuv422: bool,
 }
 
 pub struct PrefetchHandle {
@@ -117,7 +117,7 @@ fn run_prefetch_thread(
             }
 
             match state.decode_to(entry.timestamp) {
-                Ok(frame) => match state.frame_to_bytes(&frame, cfg.is_yuv422) {
+                Ok(frame) => match state.frame_to_bytes(&frame, cfg.convert_to_yuv422) {
                     Ok(data) => {
                         tracing::debug!(
                             "Prefetch: cached frame {frame_idx} at timestamp {}",

@@ -271,7 +271,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                     ),
                     num_frames: v.frames as _,
                     manual_frame_index: true,
-                    format: if v.is_yuv422 {
+                    format: if v.convert_to_yuv422 {
                         aviutl2::input::InputPixelFormat::Yuy2
                     } else {
                         aviutl2::input::InputPixelFormat::Bgra
@@ -286,7 +286,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         *handle.prefetch.config.write().unwrap() =
             handle.current_video_track.as_ref().map(|v| PrefetchConfig {
                 video_index: std::sync::Arc::new(handle.video_index.clone()),
-                is_yuv422: v.is_yuv422,
+                convert_to_yuv422: v.convert_to_yuv422,
             });
         handle.prefetch.cache.clear();
 
@@ -377,7 +377,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Video track info not set"))?;
 
-        let is_yuv422 = video_track.is_yuv422;
+        let convert_to_yuv422 = video_track.convert_to_yuv422;
         let stream_index = entry.stream_index;
         let target_ts = entry.timestamp;
 
@@ -409,7 +409,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         }
 
         let video_frame = state.decode_to(target_ts)?;
-        let pixel_data = state.frame_to_bytes(&video_frame, is_yuv422)?;
+        let pixel_data = state.frame_to_bytes(&video_frame, convert_to_yuv422)?;
         drop(state_guard);
 
         returner.write(&pixel_data);

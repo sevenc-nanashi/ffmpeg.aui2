@@ -106,11 +106,11 @@ impl VideoDecoderState {
         Ok(frame)
     }
 
-    pub fn ensure_scaler(&mut self, is_yuv422: bool) -> anyhow::Result<()> {
+    pub fn ensure_scaler(&mut self, convert_to_yuv422: bool) -> anyhow::Result<()> {
         if self.scaler.is_none() {
             let width = self.decoder.width();
             let height = self.decoder.height();
-            let dst_fmt = if is_yuv422 {
+            let dst_fmt = if convert_to_yuv422 {
                 ffmpeg_next::format::Pixel::YUYV422
             } else {
                 ffmpeg_next::format::Pixel::BGRA
@@ -192,12 +192,12 @@ impl VideoDecoderState {
     pub fn frame_to_bytes(
         &mut self,
         frame: &ffmpeg_next::frame::Video,
-        is_yuv422: bool,
+        convert_to_yuv422: bool,
     ) -> anyhow::Result<Vec<u8>> {
-        self.ensure_scaler(is_yuv422)?;
+        self.ensure_scaler(convert_to_yuv422)?;
 
         let flipped;
-        let frame_to_scale = if !is_yuv422 {
+        let frame_to_scale = if !convert_to_yuv422 {
             flipped = self.apply_vflip(frame)?;
             &flipped
         } else {
@@ -215,7 +215,7 @@ impl VideoDecoderState {
         let data = scaled.data(0);
         let stride = scaled.stride(0);
 
-        if is_yuv422 {
+        if convert_to_yuv422 {
             let bpr = w * 2;
             let mut packed = vec![0u8; h * bpr];
             if stride == bpr {
