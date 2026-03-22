@@ -63,13 +63,13 @@ fn run_prefetch_thread(
         };
 
         let mut current = position.load(Ordering::Relaxed);
-        let start_ts = cfg
+        let mut start_ts = cfg
             .video_index
             .get(current)
             .map(|e| e.timestamp)
             .unwrap_or(0.0);
         const PREFETCH_DURATION: f64 = 0.1;
-        let end_ts = start_ts + PREFETCH_DURATION;
+        let mut end_ts = start_ts + PREFETCH_DURATION;
         let next_frame = current + 1;
 
         for (i, entry) in cfg.video_index[next_frame.min(cfg.video_index.len())..]
@@ -87,6 +87,8 @@ fn run_prefetch_thread(
                     break;
                 }
                 current = new_current;
+                start_ts = new_ts;
+                end_ts = start_ts + PREFETCH_DURATION;
             }
             if entry.timestamp > end_ts {
                 break;

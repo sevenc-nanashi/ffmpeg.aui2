@@ -51,12 +51,12 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         let nonce = hasher.finish();
 
         aviutl2::tracing_subscriber::fmt()
-            // .with_max_level(tracing::Level::DEBUG)
             .with_max_level(if cfg!(debug_assertions) {
                 tracing::Level::DEBUG
             } else {
                 tracing::Level::INFO
             })
+            // .with_max_level(tracing::Level::DEBUG)
             .event_format(aviutl2::logger::AviUtl2Formatter)
             .with_writer(aviutl2::logger::AviUtl2LogWriter)
             .init();
