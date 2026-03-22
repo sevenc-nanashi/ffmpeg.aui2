@@ -38,6 +38,18 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
 
     fn new(info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
         ffmpeg_next::init()?;
+
+        let nonce = std::fs::metadata(
+            process_path::get_dylib_path()
+                .context("Failed to get plugin file metadata for version nonce")?,
+        )?
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+        let mut hasher = xxhash_rust::xxh3::Xxh3Default::new();
+        hasher.write_u64(nonce);
+        let nonce = hasher.finish();
+
         aviutl2::tracing_subscriber::fmt()
             // .with_max_level(tracing::Level::DEBUG)
             .with_max_level(if cfg!(debug_assertions) {
@@ -51,8 +63,10 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         tracing::info!("ffmpeg.aui2 plugin initialized");
         tracing::info!("AviUtl2 version: {}", info.version);
         tracing::info!("Index directory: {:?}", index_dir());
-        tracing::info!("Build timestamp: {}", env!("VERGEN_BUILD_TIMESTAMP"));
-        tracing::info!("Build nonce: {:016x}", *index::VERSION_NONCE);
+        tracing::info!(
+            "Version nonce: {:016x}",
+            index::VERSION_NONCE.get_or_init(|| { nonce })
+        );
         tracing::info!(
             "ffmpeg codec configuration: {:?}",
             ffmpeg_next::codec::configuration()
@@ -144,7 +158,9 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                 &index_header_file,
             ) {
                 Ok(header) => {
-                    if header.filehash == hash && header.version_nonce == *index::VERSION_NONCE {
+                    if header.filehash == hash
+                        && header.version_nonce == *index::VERSION_NONCE.get().unwrap()
+                    {
                         tracing::info!("Index header valid for file: {:?}. Loading index.", file);
                         false
                     } else {
@@ -152,7 +168,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                             "Index header mismatch for file: {:?}. Expected hash: {:016x}, version nonce: {:016x}. Found hash: {:016x}, version nonce: {:016x}. Recreating index.",
                             file,
                             hash,
-                            *index::VERSION_NONCE,
+                            *index::VERSION_NONCE.get().unwrap(),
                             header.filehash,
                             header.version_nonce,
                         );
