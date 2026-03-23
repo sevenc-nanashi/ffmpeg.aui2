@@ -131,6 +131,36 @@ impl VideoDecoderState {
         Ok(())
     }
 
+    fn configure_rgb_scaler_colorspace(
+        scaler: &mut ffmpeg_next::software::scaling::Context,
+        frame: &ffmpeg_next::frame::Video,
+    ) -> anyhow::Result<()> {
+        let colorspace = swscale_colorspace(frame);
+        let range = swscale_range(frame.color_range());
+
+        unsafe {
+            let coeffs = ffmpeg_next::ffi::sws_getCoefficients(colorspace);
+            anyhow::ensure!(!coeffs.is_null(), "Failed to resolve swscale coefficients");
+
+            let result = ffmpeg_next::ffi::sws_setColorspaceDetails(
+                scaler.as_mut_ptr(),
+                coeffs,
+                range,
+                coeffs,
+                1,
+                0,
+                1 << 16,
+                1 << 16,
+            );
+            anyhow::ensure!(
+                result >= 0,
+                "Failed to configure swscale colorspace details"
+            );
+        }
+
+        Ok(())
+    }
+
     fn ensure_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
         if self.filter_graph.is_some() {
             return Ok(());
@@ -205,10 +235,21 @@ impl VideoDecoderState {
         };
 
         let scaler = self.scaler.as_mut().unwrap();
+        if !convert_to_yuv422 {
+            Self::configure_rgb_scaler_colorspace(scaler, frame_to_scale)?;
+        }
         let mut scaled = ffmpeg_next::frame::Video::empty();
         scaler
             .run(frame_to_scale, &mut scaled)
             .context("Failed to scale frame")?;
+
+        if !convert_to_yuv422 {
+            scaled.set_color_space(ffmpeg_next::color::Space::RGB);
+            scaled.set_color_range(ffmpeg_next::color::Range::JPEG);
+            scaled.set_color_primaries(frame_to_scale.color_primaries());
+            scaled
+                .set_color_transfer_characteristic(frame_to_scale.color_transfer_characteristic());
+        }
 
         let w = scaled.width() as usize;
         let h = scaled.height() as usize;
@@ -240,5 +281,34 @@ impl VideoDecoderState {
             }
             Ok(output)
         }
+    }
+}
+
+fn swscale_colorspace(frame: &ffmpeg_next::frame::Video) -> i32 {
+    match frame.color_space() {
+        ffmpeg_next::color::Space::BT709 => ffmpeg_next::ffi::SWS_CS_ITU709,
+        ffmpeg_next::color::Space::FCC => ffmpeg_next::ffi::SWS_CS_FCC,
+        ffmpeg_next::color::Space::SMPTE240M => ffmpeg_next::ffi::SWS_CS_SMPTE240M,
+        ffmpeg_next::color::Space::BT2020NCL | ffmpeg_next::color::Space::BT2020CL => {
+            ffmpeg_next::ffi::SWS_CS_BT2020
+        }
+        ffmpeg_next::color::Space::BT470BG | ffmpeg_next::color::Space::SMPTE170M => {
+            ffmpeg_next::ffi::SWS_CS_ITU601
+        }
+        ffmpeg_next::color::Space::Unspecified => {
+            if frame.width() >= 1280 || frame.height() > 576 {
+                ffmpeg_next::ffi::SWS_CS_ITU709
+            } else {
+                ffmpeg_next::ffi::SWS_CS_ITU601
+            }
+        }
+        _ => ffmpeg_next::ffi::SWS_CS_DEFAULT,
+    }
+}
+
+fn swscale_range(range: ffmpeg_next::color::Range) -> i32 {
+    match range {
+        ffmpeg_next::color::Range::JPEG => 1,
+        ffmpeg_next::color::Range::MPEG | ffmpeg_next::color::Range::Unspecified => 0,
     }
 }
