@@ -197,15 +197,9 @@ fn run_audio_prefetch_thread(
     path: std::path::PathBuf,
 ) {
     let mut decoder: Option<AudioDecoderState> = None;
-    let mut fully_decoded_stream_index: Option<usize> = None;
 
     while let Ok((request, response_tx)) = rx.recv() {
-        let result = read_audio_range(
-            &path,
-            &mut decoder,
-            &mut fully_decoded_stream_index,
-            &request,
-        );
+        let result = read_audio_range(&path, &mut decoder, &request);
         let _ = response_tx.send(result);
     }
 }
@@ -213,7 +207,6 @@ fn run_audio_prefetch_thread(
 fn read_audio_range(
     path: &std::path::Path,
     decoder: &mut Option<AudioDecoderState>,
-    fully_decoded_stream_index: &mut Option<usize>,
     request: &AudioPrefetchRequest,
 ) -> anyhow::Result<Vec<f32>> {
     if request.audio_index.is_empty() {
@@ -230,26 +223,58 @@ fn read_audio_range(
             request.sample_rate,
             request.channels,
         )?);
-        *fully_decoded_stream_index = None;
     }
     let state = decoder.as_mut().unwrap();
-    if *fully_decoded_stream_index != Some(request.stream_index) {
-        tracing::info!(
-            "Audio prefetch: decoding full stream {} into memory",
-            request.stream_index
-        );
-        state.fill_all()?;
-        *fully_decoded_stream_index = Some(request.stream_index);
-    }
+
     let start_idx = request.start;
     let sample_count = request.length;
     let end_idx = start_idx + sample_count;
+
+    let covered = audio_buffer_range(state, request.channels)
+        .is_some_and(|(buf_start, buf_end)| buf_start <= start_idx && end_idx <= buf_end);
+
+    if !covered {
+        let needs_seek = match state.buffer.start_sample {
+            None => true,
+            Some(buf_start) => {
+                buf_start > start_idx
+                    || (state.decoder_eof_sent
+                        && audio_buffer_range(state, request.channels)
+                            .is_none_or(|(_, buf_end)| buf_end < end_idx))
+            }
+        };
+
+        if needs_seek {
+            let entry = request
+                .audio_index
+                .iter()
+                .rev()
+                .find(|e| e.stream_index == request.stream_index && e.start_sample as usize <= start_idx);
+
+            if let Some(entry) = entry {
+                tracing::info!(
+                    "Audio: seeking to timestamp {} (sample {})",
+                    entry.timestamp,
+                    entry.start_sample
+                );
+                state.seek(entry.timestamp);
+                state.buffer.start_sample = Some(entry.start_sample as usize);
+            } else {
+                tracing::info!("Audio: seeking to beginning");
+                state.seek(0.0);
+                state.buffer.start_sample = Some(0);
+            }
+        }
+
+        state.fill_until(end_idx)?;
+    }
+
     let track_end = request
         .audio_index
         .last()
         .map(|entry| entry.start_sample as usize)
         .unwrap_or(0);
-    let covered =
+    let covered_after =
         audio_buffer_range(state, request.channels).is_some_and(|(buffer_start, buffer_end)| {
             buffer_start <= start_idx && end_idx <= buffer_end
         });
@@ -287,9 +312,11 @@ fn read_audio_range(
         }
     }
 
-    if !covered && start_idx < track_end {
+    state.trim_before(start_idx);
+
+    if !covered_after && end_idx < track_end {
         tracing::warn!(
-            "Audio request was not fully covered after retries: requested range {}-{}, final buffer range {:?}",
+            "Audio request was not fully covered: requested range {}-{}, final buffer range {:?}",
             start_idx,
             end_idx,
             audio_buffer_range(state, request.channels)

@@ -138,8 +138,35 @@ impl AudioDecoderState {
         Ok(())
     }
 
-    pub fn fill_all(&mut self) -> anyhow::Result<()> {
-        self.fill_until(usize::MAX)
+    pub fn trim_before(&mut self, sample: usize) {
+        if let Some(start) = self.buffer.start_sample {
+            if sample > start {
+                let drain_frames =
+                    (sample - start).min(self.buffer.samples.len() / self.channels);
+                let drain_count = drain_frames * self.channels;
+                self.buffer.samples.drain(..drain_count);
+                self.buffer.start_sample = Some(start + drain_frames);
+            }
+        }
+    }
+
+    pub fn seek(&mut self, timestamp: f64) {
+        let time_base = self.input.stream(self.stream_index).unwrap().time_base();
+        let ts = (timestamp / f64::from(time_base)) as i64;
+        unsafe {
+            ffmpeg_next::ffi::avformat_seek_file(
+                self.input.as_mut_ptr(),
+                self.stream_index as i32,
+                i64::MIN,
+                ts,
+                ts,
+                0,
+            );
+        }
+        self.decoder.flush();
+        self.buffer.start_sample = None;
+        self.buffer.samples.clear();
+        self.decoder_eof_sent = false;
     }
 
     fn send_next_audio_packet(&mut self) -> anyhow::Result<bool> {
