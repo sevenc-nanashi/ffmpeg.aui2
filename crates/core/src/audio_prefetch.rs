@@ -12,32 +12,60 @@ pub struct AudioPrefetchRequest {
 }
 
 pub struct AudioPrefetchHandle {
-    tx: std::sync::mpsc::Sender<(
+    tx: tokio::sync::mpsc::Sender<(
         AudioPrefetchRequest,
-        std::sync::mpsc::SyncSender<anyhow::Result<Vec<f32>>>,
+        tokio::sync::oneshot::Sender<anyhow::Result<Vec<f32>>>,
     )>,
+    task: tokio::task::JoinHandle<()>,
 }
+
+impl Drop for AudioPrefetchHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+// AudioDecoderState contains raw FFmpeg pointers (!Send), but is only
+// accessed from one task at a time inside block_in_place.
+struct SendDecoder(Option<AudioDecoderState>);
+unsafe impl Send for SendDecoder {}
 
 impl AudioPrefetchHandle {
     pub fn new(path: std::path::PathBuf) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<(
-            AudioPrefetchRequest,
-            std::sync::mpsc::SyncSender<anyhow::Result<Vec<f32>>>,
-        )>();
-
-        std::thread::spawn(move || run_audio_prefetch_thread(rx, path));
-
-        Self { tx }
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let task = crate::runtime()
+            .spawn(run_audio_prefetch_task(rx, path));
+        Self { tx, task }
     }
 
     pub fn read(&self, request: AudioPrefetchRequest) -> anyhow::Result<Vec<f32>> {
-        let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
-        self.tx
-            .send((request, response_tx))
-            .map_err(|_| anyhow::anyhow!("Audio prefetch thread has stopped"))?;
-        response_rx
-            .recv()
-            .map_err(|_| anyhow::anyhow!("Audio prefetch response channel disconnected"))?
+        crate::runtime().block_on(async {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            self.tx
+                .send((request, response_tx))
+                .await
+                .map_err(|_| anyhow::anyhow!("Audio prefetch task has stopped"))?;
+            response_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("Audio prefetch response channel disconnected"))?
+        })
+    }
+}
+
+async fn run_audio_prefetch_task(
+    mut rx: tokio::sync::mpsc::Receiver<(
+        AudioPrefetchRequest,
+        tokio::sync::oneshot::Sender<anyhow::Result<Vec<f32>>>,
+    )>,
+    path: std::path::PathBuf,
+) {
+    let mut decoder = SendDecoder(None);
+
+    while let Some((request, response_tx)) = rx.recv().await {
+        let result = tokio::task::block_in_place(|| {
+            read_audio_range(&path, &mut decoder.0, &request)
+        });
+        let _ = response_tx.send(result);
     }
 }
 
@@ -46,21 +74,6 @@ fn audio_buffer_range(state: &AudioDecoderState, channels: usize) -> Option<(usi
         .buffer
         .start_sample
         .map(|start| (start, start + state.buffer.samples.len() / channels))
-}
-
-fn run_audio_prefetch_thread(
-    rx: std::sync::mpsc::Receiver<(
-        AudioPrefetchRequest,
-        std::sync::mpsc::SyncSender<anyhow::Result<Vec<f32>>>,
-    )>,
-    path: std::path::PathBuf,
-) {
-    let mut decoder: Option<AudioDecoderState> = None;
-
-    while let Ok((request, response_tx)) = rx.recv() {
-        let result = read_audio_range(&path, &mut decoder, &request);
-        let _ = response_tx.send(result);
-    }
 }
 
 fn read_audio_range(

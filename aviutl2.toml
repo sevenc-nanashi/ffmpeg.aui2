@@ -31,22 +31,22 @@ enabled = false
 destination = "Plugin/ffmpeg-aui2/ffmpeg.aui2"
 
 [artifacts.bootstrapper.profiles.debug]
-build = "cargo build"
+build = "cargo build -p ffmpeg_aui2_bootstrapper"
 source = "target/debug/ffmpeg_aui2_bootstrapper.dll"
 
 [artifacts.bootstrapper.profiles.release]
-build = "cargo build --release"
+build = "cargo build --release -p ffmpeg_aui2_bootstrapper"
 source = "target/release/ffmpeg_aui2_bootstrapper.dll"
 
 [artifacts.core]
 destination = "Plugin/ffmpeg-aui2/ffmpeg_aui2_core.dll"
 
 [artifacts.core.profiles.debug]
-build = "cargo build"
+build = "cargo build -p ffmpeg_aui2"
 source = "target/debug/ffmpeg_aui2.dll"
 
 [artifacts.core.profiles.release]
-build = "cargo build --release"
+build = "cargo build --release -p ffmpeg_aui2"
 source = "target/release/ffmpeg_aui2.dll"
 
 # TODO: aviutl2-cliにglobコピーを実装する

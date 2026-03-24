@@ -5,14 +5,28 @@ mod index;
 mod video;
 mod video_prefetch;
 use std::hash::Hasher;
-use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use audio_prefetch::{AudioPrefetchHandle, AudioPrefetchRequest};
 use video::VideoDecoderState;
 use video_prefetch::{PrefetchConfig, PrefetchHandle};
 
-static CONFIG: std::sync::OnceLock<config::Config> = std::sync::OnceLock::new();
+pub(crate) static CONFIG: std::sync::OnceLock<config::Config> = std::sync::OnceLock::new();
+pub(crate) static RUNTIME: std::sync::OnceLock<
+    std::sync::Mutex<Option<tokio::runtime::Runtime>>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn runtime() -> tokio::runtime::Handle {
+    RUNTIME
+        .get()
+        .expect("Tokio runtime not initialized")
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("Tokio runtime already shut down")
+        .handle()
+        .clone()
+}
 
 #[aviutl2::plugin(InputPlugin)]
 struct FfmpegAui2 {
@@ -44,6 +58,14 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
 
     fn new(info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
         ffmpeg_next::init()?;
+        RUNTIME.get_or_init(|| {
+            std::sync::Mutex::new(Some(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create Tokio runtime"),
+            ))
+        });
 
         // 更新するたびに数値を更新するのは面倒なので、プラグインの更新日（modified
         // timestamp）を元に更新するようにする
@@ -312,13 +334,14 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         };
 
         // Update prefetch config whenever video track changes
-        *handle.prefetch.config.write().unwrap() =
+        let _ = handle.prefetch.config_tx.send(
             handle.current_video_track.as_ref().map(|v| PrefetchConfig {
                 video_index: std::sync::Arc::new(handle.video_index.clone()),
                 output_format: v.output_format.clone(),
                 width: v.width,
                 height: v.height,
-            });
+            }),
+        );
         handle.prefetch.cache.clear();
 
         let audio = if let Some(a) = handle.index.audio_tracks().nth(audio_track as usize) {
@@ -408,8 +431,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         let target_ts = entry.timestamp;
 
         // Update current position and wake prefetch thread
-        handle.prefetch.position.store(frame, Ordering::Relaxed);
-        let _ = handle.prefetch.tx.send(());
+        let _ = handle.prefetch.position_tx.send(frame);
 
         // Check prefetch cache
         if let Some((_, data)) = handle.prefetch.cache.remove(&frame) {
@@ -482,6 +504,19 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             .spawn()
             .context("Failed to open config directory")?;
         Ok(())
+    }
+}
+
+impl Drop for FfmpegAui2 {
+    fn drop(&mut self) {
+        if let Some(rt) = RUNTIME
+            .get()
+            .and_then(|m| m.lock().ok())
+            .and_then(|mut g| g.take())
+        {
+            tracing::info!("Shutting down Tokio runtime");
+            rt.shutdown_background();
+        }
     }
 }
 
