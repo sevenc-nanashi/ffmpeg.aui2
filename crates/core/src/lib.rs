@@ -1,5 +1,6 @@
 mod audio;
 mod audio_prefetch;
+mod config;
 mod index;
 mod video;
 mod video_prefetch;
@@ -8,11 +9,15 @@ use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use audio_prefetch::{AudioPrefetchHandle, AudioPrefetchRequest};
-use video_prefetch::{PrefetchConfig, PrefetchHandle};
 use video::VideoDecoderState;
+use video_prefetch::{PrefetchConfig, PrefetchHandle};
+
+static CONFIG: std::sync::OnceLock<config::Config> = std::sync::OnceLock::new();
 
 #[aviutl2::plugin(InputPlugin)]
-struct FfmpegAui2 {}
+struct FfmpegAui2 {
+    config_path: std::path::PathBuf,
+}
 
 struct FfmpegAui2InputHandle {
     path: std::path::PathBuf,
@@ -54,13 +59,16 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         hasher.write_u64(nonce);
         let nonce = hasher.finish();
 
+        let plugin_dir = process_path::get_dylib_path()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let config_path = plugin_dir.join("config.ini");
+        let config = CONFIG.get_or_init(|| config::Config::load(&config_path));
+
         aviutl2::tracing_subscriber::fmt()
-            .with_max_level(if cfg!(debug_assertions) {
-                tracing::Level::DEBUG
-            } else {
-                tracing::Level::INFO
-            })
-            // .with_max_level(tracing::Level::DEBUG)
+            .with_max_level(config.log_level)
             .event_format(aviutl2::logger::AviUtl2Formatter)
             .with_writer(aviutl2::logger::AviUtl2LogWriter)
             .init();
@@ -127,7 +135,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             "ffmpeg swresample version: {}",
             format_ffmpeg_version(ffmpeg_next::software::resampling::version())
         );
-        Ok(Self {})
+        Ok(Self { config_path })
     }
 
     fn plugin_info(&self) -> aviutl2::input::InputPluginTable {
@@ -139,7 +147,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             file_filters: aviutl2::file_filters! {
                 "Video Files" => ["mp4", "mkv", "avi", "mov", "flv"],
             },
-            can_config: false,
+            can_config: true,
         }
     }
 
@@ -192,8 +200,10 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         let index = if should_create_index {
             tracing::info!("Creating index for file: {:?}", file);
             let start_time = std::time::Instant::now();
-            let index = index::create_index(&file, &index_header_path, &index_path, hash)
-                .with_context(|| format!("Failed to create index for file: {:?}", file))?;
+            let json_index = CONFIG.get().is_some_and(|c| c.json_index);
+            let index =
+                index::create_index(&file, &index_header_path, &index_path, hash, json_index)
+                    .with_context(|| format!("Failed to create index for file: {:?}", file))?;
             let elapsed = start_time.elapsed();
             tracing::info!("Index created in {:.2?}", elapsed,);
             index
@@ -460,6 +470,14 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             length: sample_count,
         })?;
         returner.write(&samples);
+        Ok(())
+    }
+
+    fn config(&self, _hwnd: aviutl2::Win32WindowHandle) -> aviutl2::AnyResult<()> {
+        std::process::Command::new("notepad.exe")
+            .arg(&self.config_path)
+            .spawn()
+            .context("Failed to open config directory")?;
         Ok(())
     }
 }

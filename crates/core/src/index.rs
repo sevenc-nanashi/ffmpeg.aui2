@@ -184,6 +184,7 @@ pub fn create_index(
     header_path: &std::path::Path,
     content_path: &std::path::Path,
     filehash: u64,
+    json_index: bool,
 ) -> aviutl2::AnyResult<IndexContentFile> {
     fn timestamp_to_seconds(timestamp: i64, time_base: ffmpeg_next::Rational) -> f64 {
         (timestamp as f64) * f64::from(time_base)
@@ -522,10 +523,11 @@ pub fn create_index(
         serde_json::to_string(&final_header).context("Failed to serialize index header")?;
     std::fs::write(header_path, header).context("Failed to write index header")?;
 
-    // debug
-    let dumped = serde_json::to_string_pretty(&index_content)
-        .unwrap_or_else(|_| "<failed to serialize for debug>".to_string());
-    std::fs::write(content_path.with_extension("json"), dumped).ok();
+    if json_index {
+        let dumped = serde_json::to_string_pretty(&index_content)
+            .unwrap_or_else(|_| "<failed to serialize for debug>".to_string());
+        std::fs::write(content_path.with_extension("json"), dumped).ok();
+    }
 
     Ok(index_content)
 }
