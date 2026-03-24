@@ -6,8 +6,7 @@ use std::hash::Hasher;
 use std::sync::atomic::Ordering;
 
 use anyhow::Context;
-use audio::AudioDecoderState;
-use prefetch::{PrefetchConfig, PrefetchHandle};
+use prefetch::{AudioPrefetchHandle, AudioPrefetchRequest, PrefetchConfig, PrefetchHandle};
 use video::VideoDecoderState;
 
 #[aviutl2::plugin(InputPlugin)]
@@ -21,7 +20,7 @@ struct FfmpegAui2InputHandle {
     current_video_track: Option<index::VideoTrackInfo>,
     current_audio_track: Option<index::AudioTrackInfo>,
     video_decoder: std::sync::Mutex<Option<VideoDecoderState>>,
-    audio_decoder: std::sync::Mutex<Option<AudioDecoderState>>,
+    audio_prefetch: AudioPrefetchHandle,
     prefetch: PrefetchHandle,
 }
 unsafe impl Send for FfmpegAui2InputHandle {}
@@ -39,6 +38,9 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
     fn new(info: aviutl2::AviUtl2Info) -> aviutl2::AnyResult<Self> {
         ffmpeg_next::init()?;
 
+        // 更新するたびに数値を更新するのは面倒なので、プラグインの更新日（modified
+        // timestamp）を元に更新するようにする
+        // 再導入するためにインデックスが再生成されるが、まぁ再導入する頻度自体は少ないので大丈夫のはず
         let nonce = std::fs::metadata(
             process_path::get_dylib_path()
                 .context("Failed to get plugin file metadata for version nonce")?,
@@ -217,6 +219,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         );
 
         Ok(FfmpegAui2InputHandle {
+            audio_prefetch: AudioPrefetchHandle::new(file.clone()),
             prefetch: PrefetchHandle::new(file.clone()),
             path: file,
             index,
@@ -225,7 +228,6 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             current_video_track: None,
             current_audio_track: None,
             video_decoder: std::sync::Mutex::new(None),
-            audio_decoder: std::sync::Mutex::new(None),
         })
     }
 
@@ -322,16 +324,11 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                     .filter(|e| e.stream_index() == a.stream_index)
                     .filter_map(|e| e.as_audio().cloned())
                     .collect();
+                handle
+                    .audio_index
+                    .sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
 
                 // Invalidate cached decoder if stream changed
-                let mut ad = handle.audio_decoder.lock().unwrap();
-                if ad
-                    .as_ref()
-                    .is_some_and(|s| s.stream_index != a.stream_index)
-                {
-                    *ad = None;
-                }
-
                 handle.current_audio_track = Some(a.clone());
 
                 Some(aviutl2::input::AudioInputInfo {
@@ -449,55 +446,18 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         let sample_rate = audio_track.sample_rate;
         let channels = audio_track.channels as usize;
 
+        // AviUtl2 passes start/length in audio frames, not interleaved f32 element count.
         let start_idx = start.max(0) as usize;
-        let length = length.max(0) as usize;
-        let end_idx = start_idx + length;
-
-        let mut state_guard = handle.audio_decoder.lock().unwrap();
-
-        if state_guard
-            .as_ref()
-            .is_none_or(|s| s.stream_index != stream_index)
-        {
-            *state_guard = Some(
-                AudioDecoderState::new(&handle.path, stream_index, sample_rate, channels)
-                    .with_context(|| {
-                        format!(
-                            "Failed to initialize audio decoder for stream {}",
-                            stream_index
-                        )
-                    })?,
-            );
-        }
-
-        let state = state_guard.as_mut().unwrap();
-
-        let buffer_end_sample = state.buffer_start + state.buffer.len() / channels;
-        let seek_threshold = sample_rate as usize; // 1秒分
-        if start_idx < state.buffer_start || start_idx > buffer_end_sample + seek_threshold {
-            let start_time = start_idx as f64 / sample_rate as f64;
-            let seek_pos = handle
-                .audio_index
-                .partition_point(|e| e.timestamp < start_time);
-            let seek_ts = handle.audio_index[seek_pos.saturating_sub(1)].timestamp;
-            state.seek(seek_ts);
-        } else if start_idx > state.buffer_start {
-            let trim = ((start_idx - state.buffer_start) * channels).min(state.buffer.len());
-            state.buffer.drain(..trim);
-            state.buffer_start = start_idx;
-        }
-
-        state.fill_until(end_idx)?;
-
-        let buf_offset = (start_idx - state.buffer_start) * channels;
-        let needed = length * channels;
-        let available = state.buffer.len().saturating_sub(buf_offset);
-        let copy_len = needed.min(available);
-
-        let mut output = vec![0.0f32; needed];
-        output[..copy_len].copy_from_slice(&state.buffer[buf_offset..buf_offset + copy_len]);
-
-        returner.write(&output);
+        let sample_count = length.max(0) as usize;
+        let samples = handle.audio_prefetch.read(AudioPrefetchRequest {
+            audio_index: std::sync::Arc::new(handle.audio_index.clone()),
+            stream_index,
+            sample_rate,
+            channels,
+            start: start_idx,
+            length: sample_count,
+        })?;
+        returner.write(&samples);
         Ok(())
     }
 }

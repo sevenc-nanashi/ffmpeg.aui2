@@ -1,5 +1,6 @@
 use std::sync::atomic::Ordering;
 
+use crate::audio::AudioDecoderState;
 use crate::index;
 use crate::video::VideoDecoderState;
 
@@ -14,6 +15,46 @@ pub struct PrefetchHandle {
     pub config: std::sync::Arc<std::sync::RwLock<Option<PrefetchConfig>>>,
     pub position: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub tx: std::sync::mpsc::Sender<()>,
+}
+
+#[derive(Clone)]
+pub struct AudioPrefetchRequest {
+    pub audio_index: std::sync::Arc<Vec<index::AudioEntry>>,
+    pub stream_index: usize,
+    pub sample_rate: u32,
+    pub channels: usize,
+    pub start: usize,
+    pub length: usize,
+}
+
+pub struct AudioPrefetchHandle {
+    tx: std::sync::mpsc::Sender<(
+        AudioPrefetchRequest,
+        std::sync::mpsc::SyncSender<anyhow::Result<Vec<f32>>>,
+    )>,
+}
+
+impl AudioPrefetchHandle {
+    pub fn new(path: std::path::PathBuf) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(
+            AudioPrefetchRequest,
+            std::sync::mpsc::SyncSender<anyhow::Result<Vec<f32>>>,
+        )>();
+
+        std::thread::spawn(move || run_audio_prefetch_thread(rx, path));
+
+        Self { tx }
+    }
+
+    pub fn read(&self, request: AudioPrefetchRequest) -> anyhow::Result<Vec<f32>> {
+        let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .send((request, response_tx))
+            .map_err(|_| anyhow::anyhow!("Audio prefetch thread has stopped"))?;
+        response_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("Audio prefetch response channel disconnected"))?
+    }
 }
 
 impl PrefetchHandle {
@@ -139,4 +180,121 @@ fn run_prefetch_thread(
             }
         }
     }
+}
+
+fn audio_buffer_range(state: &AudioDecoderState, channels: usize) -> Option<(usize, usize)> {
+    state
+        .buffer
+        .start_sample
+        .map(|start| (start, start + state.buffer.samples.len() / channels))
+}
+
+fn run_audio_prefetch_thread(
+    rx: std::sync::mpsc::Receiver<(
+        AudioPrefetchRequest,
+        std::sync::mpsc::SyncSender<anyhow::Result<Vec<f32>>>,
+    )>,
+    path: std::path::PathBuf,
+) {
+    let mut decoder: Option<AudioDecoderState> = None;
+    let mut fully_decoded_stream_index: Option<usize> = None;
+
+    while let Ok((request, response_tx)) = rx.recv() {
+        let result = read_audio_range(
+            &path,
+            &mut decoder,
+            &mut fully_decoded_stream_index,
+            &request,
+        );
+        let _ = response_tx.send(result);
+    }
+}
+
+fn read_audio_range(
+    path: &std::path::Path,
+    decoder: &mut Option<AudioDecoderState>,
+    fully_decoded_stream_index: &mut Option<usize>,
+    request: &AudioPrefetchRequest,
+) -> anyhow::Result<Vec<f32>> {
+    if request.audio_index.is_empty() {
+        anyhow::bail!("Audio index is empty");
+    }
+
+    if decoder
+        .as_ref()
+        .is_none_or(|state| state.stream_index != request.stream_index)
+    {
+        *decoder = Some(AudioDecoderState::new(
+            path,
+            request.stream_index,
+            request.sample_rate,
+            request.channels,
+        )?);
+        *fully_decoded_stream_index = None;
+    }
+    let state = decoder.as_mut().unwrap();
+    if *fully_decoded_stream_index != Some(request.stream_index) {
+        tracing::info!(
+            "Audio prefetch: decoding full stream {} into memory",
+            request.stream_index
+        );
+        state.fill_all()?;
+        *fully_decoded_stream_index = Some(request.stream_index);
+    }
+    let start_idx = request.start;
+    let sample_count = request.length;
+    let end_idx = start_idx + sample_count;
+    let track_end = request
+        .audio_index
+        .last()
+        .map(|entry| entry.start_sample as usize)
+        .unwrap_or(0);
+    let covered =
+        audio_buffer_range(state, request.channels).is_some_and(|(buffer_start, buffer_end)| {
+            buffer_start <= start_idx && end_idx <= buffer_end
+        });
+
+    let total_f32 = sample_count * request.channels;
+    let mut samples = vec![0.0f32; total_f32];
+
+    if let Some(buffer_start) = state.buffer.start_sample {
+        let buffer_end = buffer_start + state.buffer.samples.len() / request.channels;
+        let copy_start = start_idx.max(buffer_start);
+        let copy_end = end_idx.min(buffer_end);
+
+        tracing::debug!(
+            "Audio buffer range: {}-{}, requested range: {}-{}",
+            buffer_start,
+            buffer_end,
+            start_idx,
+            end_idx
+        );
+
+        if copy_start < copy_end {
+            let src_offset = (copy_start - buffer_start) * request.channels;
+            let dst_offset = (copy_start - start_idx) * request.channels;
+            let copy_len = (copy_end - copy_start) * request.channels;
+            for (i, sample) in state
+                .buffer
+                .samples
+                .iter()
+                .skip(src_offset)
+                .take(copy_len)
+                .enumerate()
+            {
+                samples[dst_offset + i] = *sample;
+            }
+        }
+    }
+
+    if !covered && start_idx < track_end {
+        tracing::warn!(
+            "Audio request was not fully covered after retries: requested range {}-{}, final buffer range {:?}",
+            start_idx,
+            end_idx,
+            audio_buffer_range(state, request.channels)
+        );
+    }
+
+    Ok(samples)
 }

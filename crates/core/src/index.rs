@@ -9,7 +9,15 @@ pub struct IndexHeaderFile {
     pub version_nonce: u64,
 }
 
-#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct IndexContentFile {
     pub tracks: Vec<TrackInfo>,
     pub entries: Vec<IndexEntry>,
@@ -36,20 +44,45 @@ impl IndexContentFile {
     }
 }
 
-#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum TrackInfo {
     Video(VideoTrackInfo),
     Audio(AudioTrackInfo),
 }
 
-#[derive(Debug, Clone, PartialEq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum VideoOutputFormat {
     Bgra,
     Yuy2,
     Hf64,
 }
 
-#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct VideoTrackInfo {
     pub stream_index: usize,
     pub width: u32,
@@ -58,7 +91,15 @@ pub struct VideoTrackInfo {
     pub duration: f64,
     pub output_format: VideoOutputFormat,
 }
-#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct AudioTrackInfo {
     pub stream_index: usize,
     pub sample_rate: u32,
@@ -67,7 +108,15 @@ pub struct AudioTrackInfo {
     pub duration: f64,
 }
 
-#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct VideoEntry {
     pub stream_index: usize,
     pub keyframe: bool,
@@ -77,14 +126,31 @@ pub struct VideoEntry {
     pub last_keyframe_timestamp: f64,
 }
 
-#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct AudioEntry {
     pub stream_index: usize,
     pub position: u64,
     pub timestamp: f64,
+    pub start_sample: u64,
 }
 
-#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(
+    Debug,
+    Clone,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum IndexEntry {
     Video(VideoEntry),
     Audio(AudioEntry),
@@ -123,6 +189,14 @@ pub fn create_index(
         (timestamp as f64) * f64::from(time_base)
     }
 
+    fn stream_duration_seconds(duration: i64, time_base: ffmpeg_next::Rational) -> f64 {
+        if duration == ffmpeg_next::ffi::AV_NOPTS_VALUE || duration <= 0 {
+            0.0
+        } else {
+            timestamp_to_seconds(duration, time_base)
+        }
+    }
+
     fn packet_timestamp(packet: &ffmpeg_next::Packet) -> i64 {
         packet.pts().or_else(|| packet.dts()).unwrap_or(0)
     }
@@ -147,13 +221,14 @@ pub fn create_index(
                     ffmpeg_next::codec::context::Context::from_parameters(stream.parameters())
                         .ok()?;
                 let video = codec.decoder().video().ok()?;
+                let duration = stream_duration_seconds(stream.duration(), stream.time_base());
                 tracing::info!(
                     "Found video stream {}: {}x{}, frames={}, duration={:.2}s, format={:?}",
                     stream.index(),
                     video.width(),
                     video.height(),
                     stream.frames(),
-                    (stream.duration() as f64) * f64::from(stream.time_base()),
+                    duration,
                     video.format()
                 );
                 Some(TrackInfo::Video(VideoTrackInfo {
@@ -161,7 +236,7 @@ pub fn create_index(
                     width: video.width(),
                     height: video.height(),
                     frames: stream.frames().max(0) as u64,
-                    duration: (stream.duration() as f64) * f64::from(stream.time_base()),
+                    duration,
                     output_format: {
                         let is_hdr = matches!(
                             video.color_transfer_characteristic(),
@@ -219,13 +294,14 @@ pub fn create_index(
                     ffmpeg_next::codec::context::Context::from_parameters(stream.parameters())
                         .ok()?;
                 let audio = codec.decoder().audio().ok()?;
+                let duration = stream_duration_seconds(stream.duration(), stream.time_base());
                 tracing::info!(
                     "Found audio stream {}: {} Hz, {} channels, frames={}, duration={:.2}s, format={:?}",
                     stream.index(),
                     audio.rate(),
                     audio.channels(),
                     stream.frames(),
-                    (stream.duration() as f64) * f64::from(stream.time_base()),
+                    duration,
                     audio.format()
                 );
                 Some(TrackInfo::Audio(AudioTrackInfo {
@@ -233,7 +309,7 @@ pub fn create_index(
                     sample_rate: audio.rate(),
                     channels: audio.channels(),
                     samples: stream.frames().max(0) as u64,
-                    duration: (stream.duration() as f64) * f64::from(stream.time_base()),
+                    duration,
                 }))
             }
             _ => None,
@@ -256,18 +332,19 @@ pub fn create_index(
             v.height = largest_video_size.1;
         }
     }
-    // Build sample_rate map for audio streams to accumulate sample counts
-    let audio_sample_rates: std::collections::HashMap<usize, u32> = tracks
-        .iter()
-        .filter_map(|t| {
-            if let TrackInfo::Audio(a) = t {
-                Some((a.stream_index, a.sample_rate))
-            } else {
-                None
-            }
-        })
-        .collect();
-    let mut audio_sample_counts: std::collections::HashMap<usize, u64> =
+    let mut audio_decoders: std::collections::HashMap<usize, ffmpeg_next::decoder::Audio> =
+        std::collections::HashMap::new();
+    for stream in input.streams() {
+        if stream.parameters().medium() != ffmpeg_next::media::Type::Audio {
+            continue;
+        }
+        let codec_ctx = ffmpeg_next::codec::context::Context::from_parameters(stream.parameters())?;
+        let mut decoder = codec_ctx.decoder().audio()?;
+        decoder.set_packet_time_base(stream.time_base());
+        audio_decoders.insert(stream.index(), decoder);
+    }
+
+    let mut decoded_audio_sample_counts: std::collections::HashMap<usize, u64> =
         std::collections::HashMap::new();
     let mut video_packet_counts: std::collections::HashMap<usize, u64> =
         std::collections::HashMap::new();
@@ -306,10 +383,33 @@ pub fn create_index(
                 let timestamp = timestamp_to_seconds(packet_timestamp(&packet), time_base);
                 let end_timestamp =
                     timestamp + timestamp_to_seconds(packet.duration().max(0), time_base);
-                if let Some(&sr) = audio_sample_rates.get(&stream.index()) {
-                    let samples =
-                        (packet.duration() as f64 * f64::from(time_base) * sr as f64) as u64;
-                    *audio_sample_counts.entry(stream.index()).or_insert(0) += samples;
+                let packet_start_sample = decoded_audio_sample_counts
+                    .get(&stream.index())
+                    .copied()
+                    .unwrap_or(0);
+                if let Some(decoder) = audio_decoders.get_mut(&stream.index()) {
+                    decoder.send_packet(&packet)?;
+                    let mut frame = ffmpeg_next::frame::Audio::empty();
+                    loop {
+                        match decoder.receive_frame(&mut frame) {
+                            Ok(()) => {
+                                *decoded_audio_sample_counts
+                                    .entry(stream.index())
+                                    .or_insert(0) += frame.samples() as u64;
+                            }
+                            Err(ffmpeg_next::util::error::Error::Other {
+                                errno: ffmpeg_next::ffi::EAGAIN,
+                            }) => break,
+                            Err(ffmpeg_next::util::error::Error::Eof) => break,
+                            Err(e) => {
+                                return Err(anyhow::anyhow!(
+                                    "Failed to decode audio while indexing stream {}: {}",
+                                    stream.index(),
+                                    e
+                                ));
+                            }
+                        }
+                    }
                 }
                 audio_end_timestamps
                     .entry(stream.index())
@@ -319,9 +419,35 @@ pub fn create_index(
                     stream_index: stream.index(),
                     position: packet.position() as u64,
                     timestamp,
+                    start_sample: packet_start_sample,
                 }));
             }
             _ => {}
+        }
+    }
+
+    for (stream_index, decoder) in &mut audio_decoders {
+        decoder.send_eof()?;
+        let mut frame = ffmpeg_next::frame::Audio::empty();
+        loop {
+            match decoder.receive_frame(&mut frame) {
+                Ok(()) => {
+                    *decoded_audio_sample_counts
+                        .entry(*stream_index)
+                        .or_insert(0) += frame.samples() as u64;
+                }
+                Err(ffmpeg_next::util::error::Error::Eof)
+                | Err(ffmpeg_next::util::error::Error::Other {
+                    errno: ffmpeg_next::ffi::EAGAIN,
+                }) => break,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to flush audio decoder while indexing stream {}: {}",
+                        stream_index,
+                        e
+                    ));
+                }
+            }
         }
     }
 
@@ -341,7 +467,7 @@ pub fn create_index(
                 }
             }
             TrackInfo::Audio(a) => {
-                if let Some(&count) = audio_sample_counts.get(&a.stream_index)
+                if let Some(&count) = decoded_audio_sample_counts.get(&a.stream_index)
                     && count > 0
                 {
                     a.samples = count;
@@ -351,9 +477,32 @@ pub fn create_index(
                 {
                     a.duration = duration;
                 }
-                if a.samples == 0 && a.duration > 0.0 {
-                    a.samples = (a.duration * a.sample_rate as f64) as u64;
-                }
+            }
+        }
+    }
+
+    for track in &tracks {
+        match track {
+            TrackInfo::Video(v) => {
+                tracing::info!(
+                    "Final video track {}: {}x{}, frames={}, duration={:.2}s, output_format={:?}",
+                    v.stream_index,
+                    v.width,
+                    v.height,
+                    v.frames,
+                    v.duration,
+                    v.output_format
+                );
+            }
+            TrackInfo::Audio(a) => {
+                tracing::info!(
+                    "Final audio track {}: {} Hz, {} channels, samples={}, duration={:.2}s",
+                    a.stream_index,
+                    a.sample_rate,
+                    a.channels,
+                    a.samples,
+                    a.duration
+                );
             }
         }
     }
@@ -372,6 +521,11 @@ pub fn create_index(
     let header =
         serde_json::to_string(&final_header).context("Failed to serialize index header")?;
     std::fs::write(header_path, header).context("Failed to write index header")?;
+
+    // debug
+    let dumped = serde_json::to_string_pretty(&index_content)
+        .unwrap_or_else(|_| "<failed to serialize for debug>".to_string());
+    std::fs::write(content_path.with_extension("json"), dumped).ok();
 
     Ok(index_content)
 }
