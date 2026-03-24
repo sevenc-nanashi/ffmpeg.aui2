@@ -277,14 +277,12 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
 
                 handle.current_video_track = Some(v.clone());
 
+                let fps = v.frames as f64 / v.duration;
                 static FPS_ACCURACY: i32 = 1000;
                 Some(aviutl2::input::VideoInputInfo {
                     width: v.width,
                     height: v.height,
-                    fps: aviutl2::Rational32::new(
-                        v.frames as i32 * FPS_ACCURACY,
-                        (v.duration * FPS_ACCURACY as f64) as i32,
-                    ),
+                    fps: aviutl2::Rational32::new(fps.round() as i32 * FPS_ACCURACY, FPS_ACCURACY),
                     num_frames: v.frames as _,
                     manual_frame_index: true,
                     format: match v.output_format {
