@@ -1,3 +1,4 @@
+use crate::config::HwAccel;
 use crate::index::VideoOutputFormat;
 use anyhow::Context;
 use aviutl2::f16;
@@ -11,6 +12,7 @@ pub struct VideoDecoderState {
     pub stream_index: usize,
     pub time_base: ffmpeg_next::Rational,
     pub current_ts: f64,
+    is_hw: bool,
 }
 
 impl VideoDecoderState {
@@ -43,6 +45,11 @@ impl VideoDecoderState {
             kind: threading_kind,
             count: 0,
         });
+        let hwaccel = crate::CONFIG
+            .get()
+            .map(|c| c.hwaccel.clone())
+            .unwrap_or(HwAccel::None);
+        let is_hw = try_setup_hwaccel(&codec, &mut codec_ctx, &hwaccel);
         let decoder = codec_ctx.decoder().video()?;
         Ok(Self {
             input,
@@ -53,6 +60,7 @@ impl VideoDecoderState {
             stream_index,
             time_base,
             current_ts: f64::NEG_INFINITY,
+            is_hw,
         })
     }
 
@@ -107,10 +115,19 @@ impl VideoDecoderState {
             }
         }
 
+        let frame = if self.is_hw {
+            download_hw_frame(frame)?
+        } else {
+            frame
+        };
         Ok(frame)
     }
 
-    pub fn ensure_scaler(&mut self, output_format: &VideoOutputFormat) -> anyhow::Result<()> {
+    pub fn ensure_scaler(
+        &mut self,
+        output_format: &VideoOutputFormat,
+        src_fmt: ffmpeg_next::format::Pixel,
+    ) -> anyhow::Result<()> {
         if self.scaler.is_none() {
             let width = self.decoder.width();
             let height = self.decoder.height();
@@ -121,7 +138,7 @@ impl VideoDecoderState {
             };
             self.scaler = Some(
                 ffmpeg_next::software::scaling::Context::get(
-                    self.decoder.format(),
+                    src_fmt,
                     width,
                     height,
                     dst_fmt,
@@ -293,7 +310,7 @@ impl VideoDecoderState {
             return Self::hf64_frame_to_bytes(&scaled);
         }
 
-        self.ensure_scaler(output_format)?;
+        self.ensure_scaler(output_format, frame.format())?;
 
         let needs_vflip = matches!(output_format, VideoOutputFormat::Bgra);
         let flipped;
@@ -400,6 +417,87 @@ impl VideoDecoderState {
 
         Ok(output)
     }
+}
+
+fn codec_supports_hwaccel(
+    codec: *const ffmpeg_next::ffi::AVCodec,
+    hw_type: ffmpeg_next::ffi::AVHWDeviceType,
+) -> bool {
+    unsafe {
+        let mut i = 0;
+        loop {
+            let config = ffmpeg_next::ffi::avcodec_get_hw_config(codec, i);
+            if config.is_null() {
+                return false;
+            }
+            if (*config).device_type == hw_type {
+                return true;
+            }
+            i += 1;
+        }
+    }
+}
+
+fn try_setup_hwaccel(
+    codec: &ffmpeg_next::codec::codec::Codec,
+    codec_ctx: &mut ffmpeg_next::codec::context::Context,
+    hwaccel: &HwAccel,
+) -> bool {
+    let types_to_try: &[ffmpeg_next::ffi::AVHWDeviceType] = match hwaccel {
+        HwAccel::None => return false,
+        HwAccel::Auto => &[
+            ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+            ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2,
+        ],
+        HwAccel::D3d11va => &[ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA],
+        HwAccel::Dxva2 => &[ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2],
+        HwAccel::Cuda => &[ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA],
+    };
+
+    for &hw_type in types_to_try {
+        if !codec_supports_hwaccel(unsafe { codec.as_ptr() }, hw_type) {
+            tracing::debug!("Codec does not support {:?}", hw_type);
+            continue;
+        }
+
+        let mut hw_device_ctx: *mut ffmpeg_next::ffi::AVBufferRef = std::ptr::null_mut();
+        let ret = unsafe {
+            ffmpeg_next::ffi::av_hwdevice_ctx_create(
+                &mut hw_device_ctx,
+                hw_type,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if ret < 0 {
+            tracing::warn!("Failed to create HW device context for {:?}: {}", hw_type, ret);
+            continue;
+        }
+        unsafe {
+            (*codec_ctx.as_mut_ptr()).hw_device_ctx =
+                ffmpeg_next::ffi::av_buffer_ref(hw_device_ctx);
+            ffmpeg_next::ffi::av_buffer_unref(&mut hw_device_ctx);
+        }
+        tracing::info!("Hardware acceleration enabled: {:?}", hw_type);
+        return true;
+    }
+
+    false
+}
+
+fn download_hw_frame(
+    hw_frame: ffmpeg_next::frame::Video,
+) -> anyhow::Result<ffmpeg_next::frame::Video> {
+    let mut sw_frame = ffmpeg_next::frame::Video::empty();
+    let ret = unsafe {
+        ffmpeg_next::ffi::av_hwframe_transfer_data(sw_frame.as_mut_ptr(), hw_frame.as_ptr(), 0)
+    };
+    anyhow::ensure!(ret >= 0, "Failed to transfer HW frame to SW memory: {}", ret);
+    unsafe {
+        (*sw_frame.as_mut_ptr()).pts = (*hw_frame.as_ptr()).pts;
+    }
+    Ok(sw_frame)
 }
 
 fn swscale_colorspace(frame: &ffmpeg_next::frame::Video) -> i32 {

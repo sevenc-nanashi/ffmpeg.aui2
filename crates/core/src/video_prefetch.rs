@@ -12,7 +12,7 @@ pub struct PrefetchConfig {
 }
 
 pub struct PrefetchHandle {
-    pub cache: std::sync::Arc<dashmap::DashMap<usize, Vec<u8>>>,
+    pub cache: std::sync::Arc<dashmap::DashMap<usize, Vec<u8>, gxhash::GxBuildHasher>>,
     pub config: std::sync::Arc<std::sync::RwLock<Option<PrefetchConfig>>>,
     pub position: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub tx: std::sync::mpsc::Sender<()>,
@@ -20,7 +20,7 @@ pub struct PrefetchHandle {
 
 impl PrefetchHandle {
     pub fn new(path: std::path::PathBuf) -> Self {
-        let cache = std::sync::Arc::new(dashmap::DashMap::new());
+        let cache = std::sync::Arc::new(dashmap::DashMap::<_, _, gxhash::GxBuildHasher>::default());
         let config = std::sync::Arc::new(std::sync::RwLock::new(None::<PrefetchConfig>));
         let position = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -48,7 +48,7 @@ fn run_prefetch_thread(
     path: std::path::PathBuf,
     position: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     config: std::sync::Arc<std::sync::RwLock<Option<PrefetchConfig>>>,
-    cache: std::sync::Arc<dashmap::DashMap<usize, Vec<u8>>>,
+    cache: std::sync::Arc<dashmap::DashMap<usize, Vec<u8>, gxhash::GxBuildHasher>>,
 ) {
     let mut decoder: Option<VideoDecoderState> = None;
 

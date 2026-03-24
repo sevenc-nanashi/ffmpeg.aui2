@@ -1,9 +1,19 @@
 const DEFAULT_CONFIG: &str = include_str!("./default_config.ini");
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HwAccel {
+    None,
+    Auto,
+    D3d11va,
+    Dxva2,
+    Cuda,
+}
+
 pub struct Config {
     pub log_level: tracing::Level,
     pub json_index: bool,
     pub prefetch_buffer_mb: u32,
+    pub hwaccel: HwAccel,
 }
 
 impl Default for Config {
@@ -12,6 +22,7 @@ impl Default for Config {
             log_level: tracing::Level::INFO,
             json_index: false,
             prefetch_buffer_mb: 512,
+            hwaccel: HwAccel::None,
         }
     }
 }
@@ -64,6 +75,16 @@ impl Config {
                         if let Ok(v) = value.parse::<u32>() {
                             config.prefetch_buffer_mb = v;
                         }
+                    }
+                    "hwaccel" => {
+                        config.hwaccel = match value.to_ascii_lowercase().as_str() {
+                            "none" | "off" | "false" => HwAccel::None,
+                            "auto" => HwAccel::Auto,
+                            "d3d11va" => HwAccel::D3d11va,
+                            "dxva2" => HwAccel::Dxva2,
+                            "cuda" => HwAccel::Cuda,
+                            _ => HwAccel::None,
+                        };
                     }
                     _ => {}
                 }
