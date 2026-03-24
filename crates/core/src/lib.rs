@@ -148,15 +148,12 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         let hash = hash.finish();
         tracing::info!("File {:?} has XXH3 hash: {:016x}", file, hash);
 
-        let index_header_path = index_dir().join(format!("{:016x}.header.index", hash));
+        let index_header_path = index_dir().join(format!("{:016x}.header.json", hash));
         let index_path = index_dir().join(format!("{:016x}.index", hash));
         let should_create_index = if index_header_path.exists() && index_path.exists() {
-            let index_header_file = std::fs::read(&index_header_path).with_context(|| {
-                format!("Failed to open index header file: {:?}", index_header_path)
-            })?;
-            match rkyv::from_bytes::<index::IndexHeaderFile, rkyv::rancor::Error>(
-                &index_header_file,
-            ) {
+            match serde_json::from_reader::<_, index::IndexHeaderFile>(std::fs::File::open(
+                &index_header_path,
+            )?) {
                 Ok(header) => {
                     if header.filehash == hash
                         && header.version_nonce == *index::VERSION_NONCE.get().unwrap()
@@ -278,11 +275,14 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                 handle.current_video_track = Some(v.clone());
 
                 let fps = v.frames as f64 / v.duration;
-                static FPS_ACCURACY: i32 = 1000;
+                const FPS_ACCURACY: i32 = 10i32.pow(3);
                 Some(aviutl2::input::VideoInputInfo {
                     width: v.width,
                     height: v.height,
-                    fps: aviutl2::Rational32::new(fps.round() as i32 * FPS_ACCURACY, FPS_ACCURACY),
+                    fps: aviutl2::Rational32::new(
+                        (fps * FPS_ACCURACY as f64).round() as i32,
+                        FPS_ACCURACY,
+                    ),
                     num_frames: v.frames as _,
                     manual_frame_index: true,
                     format: match v.output_format {

@@ -2,7 +2,7 @@ use anyhow::Context;
 
 pub static VERSION_NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
-#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexHeaderFile {
     pub filename: String,
     pub filehash: u64,
@@ -121,6 +121,10 @@ pub fn create_index(
 ) -> aviutl2::AnyResult<IndexContentFile> {
     fn timestamp_to_seconds(timestamp: i64, time_base: ffmpeg_next::Rational) -> f64 {
         (timestamp as f64) * f64::from(time_base)
+    }
+
+    fn packet_timestamp(packet: &ffmpeg_next::Packet) -> i64 {
+        packet.pts().or_else(|| packet.dts()).unwrap_or(0)
     }
 
     let filename = path
@@ -265,6 +269,12 @@ pub fn create_index(
         .collect();
     let mut audio_sample_counts: std::collections::HashMap<usize, u64> =
         std::collections::HashMap::new();
+    let mut video_packet_counts: std::collections::HashMap<usize, u64> =
+        std::collections::HashMap::new();
+    let mut video_end_timestamps: std::collections::HashMap<usize, f64> =
+        std::collections::HashMap::new();
+    let mut audio_end_timestamps: std::collections::HashMap<usize, f64> =
+        std::collections::HashMap::new();
 
     let mut last_keyframe_timestamp = 0.0f64;
 
@@ -272,10 +282,17 @@ pub fn create_index(
         let time_base = stream.time_base();
         match stream.parameters().medium() {
             ffmpeg_next::media::Type::Video => {
-                let timestamp = timestamp_to_seconds(packet.pts().unwrap_or(0), time_base);
+                let timestamp = timestamp_to_seconds(packet_timestamp(&packet), time_base);
+                let end_timestamp =
+                    timestamp + timestamp_to_seconds(packet.duration().max(0), time_base);
                 if packet.is_key() {
                     last_keyframe_timestamp = timestamp;
                 }
+                *video_packet_counts.entry(stream.index()).or_insert(0) += 1;
+                video_end_timestamps
+                    .entry(stream.index())
+                    .and_modify(|current| *current = current.max(end_timestamp))
+                    .or_insert(end_timestamp);
                 entries.push(IndexEntry::Video(VideoEntry {
                     stream_index: stream.index(),
                     keyframe: packet.is_key(),
@@ -286,27 +303,58 @@ pub fn create_index(
                 }));
             }
             ffmpeg_next::media::Type::Audio => {
+                let timestamp = timestamp_to_seconds(packet_timestamp(&packet), time_base);
+                let end_timestamp =
+                    timestamp + timestamp_to_seconds(packet.duration().max(0), time_base);
                 if let Some(&sr) = audio_sample_rates.get(&stream.index()) {
                     let samples =
                         (packet.duration() as f64 * f64::from(time_base) * sr as f64) as u64;
                     *audio_sample_counts.entry(stream.index()).or_insert(0) += samples;
                 }
+                audio_end_timestamps
+                    .entry(stream.index())
+                    .and_modify(|current| *current = current.max(end_timestamp))
+                    .or_insert(end_timestamp);
                 entries.push(IndexEntry::Audio(AudioEntry {
                     stream_index: stream.index(),
                     position: packet.position() as u64,
-                    timestamp: timestamp_to_seconds(packet.pts().unwrap_or(0), time_base),
+                    timestamp,
                 }));
             }
             _ => {}
         }
     }
 
-    // Update samples field with actual counts from packet durations
+    // Containers like FLV often omit stream frame counts/durations, so fill them from packet data.
     for track in &mut tracks {
-        if let TrackInfo::Audio(a) = track
-            && let Some(&count) = audio_sample_counts.get(&a.stream_index)
-        {
-            a.samples = count;
+        match track {
+            TrackInfo::Video(v) => {
+                if let Some(&count) = video_packet_counts.get(&v.stream_index)
+                    && v.frames == 0
+                {
+                    v.frames = count;
+                }
+                if let Some(&duration) = video_end_timestamps.get(&v.stream_index)
+                    && v.duration <= 0.0
+                {
+                    v.duration = duration;
+                }
+            }
+            TrackInfo::Audio(a) => {
+                if let Some(&count) = audio_sample_counts.get(&a.stream_index)
+                    && count > 0
+                {
+                    a.samples = count;
+                }
+                if let Some(&duration) = audio_end_timestamps.get(&a.stream_index)
+                    && a.duration <= 0.0
+                {
+                    a.duration = duration;
+                }
+                if a.samples == 0 && a.duration > 0.0 {
+                    a.samples = (a.duration * a.sample_rate as f64) as u64;
+                }
+            }
         }
     }
 
@@ -321,9 +369,9 @@ pub fn create_index(
         filehash,
         version_nonce: *VERSION_NONCE.get().unwrap_or(&0),
     };
-    let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&final_header)
-        .context("Failed to serialize final index header")?;
-    std::fs::write(header_path, &*header_bytes).context("Failed to write final index header")?;
+    let header =
+        serde_json::to_string(&final_header).context("Failed to serialize index header")?;
+    std::fs::write(header_path, header).context("Failed to write index header")?;
 
     Ok(index_content)
 }
