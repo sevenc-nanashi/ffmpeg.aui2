@@ -547,7 +547,10 @@ impl Drop for FfmpegAui2 {
             .and_then(|mut g| g.take())
         {
             tracing::info!("Shutting down Tokio runtime");
-            rt.shutdown_background();
+            let current = std::time::Instant::now();
+            rt.shutdown_timeout(std::time::Duration::from_secs(5));
+            let elapsed = current.elapsed();
+            tracing::info!("Tokio runtime shut down in {:.2?}", elapsed);
         }
     }
 }
