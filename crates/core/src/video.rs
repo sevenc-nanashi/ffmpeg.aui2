@@ -45,11 +45,8 @@ impl VideoDecoderState {
             kind: threading_kind,
             count: 0,
         });
-        let hwaccel = crate::CONFIG
-            .get()
-            .map(|c| c.hwaccel.clone())
-            .unwrap_or(HwAccel::None);
-        let is_hw = try_setup_hwaccel(&codec, &mut codec_ctx, &hwaccel);
+        let hwaccel = &crate::config().hwaccel;
+        let is_hw = try_setup_hwaccel(&codec, &mut codec_ctx, hwaccel);
         let decoder = codec_ctx.decoder().video()?;
         Ok(Self {
             input,

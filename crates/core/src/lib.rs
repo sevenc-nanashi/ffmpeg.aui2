@@ -15,9 +15,8 @@ pub(crate) static CONFIG: std::sync::OnceLock<config::Config> = std::sync::OnceL
 /// Total bytes currently held in all video prefetch caches.
 pub(crate) static PREFETCH_TOTAL_BYTES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
-pub(crate) static RUNTIME: std::sync::OnceLock<
-    std::sync::Mutex<Option<tokio::runtime::Runtime>>,
-> = std::sync::OnceLock::new();
+pub(crate) static RUNTIME: std::sync::OnceLock<std::sync::Mutex<Option<tokio::runtime::Runtime>>> =
+    std::sync::OnceLock::new();
 
 pub(crate) fn runtime() -> tokio::runtime::Handle {
     RUNTIME
@@ -29,6 +28,9 @@ pub(crate) fn runtime() -> tokio::runtime::Handle {
         .expect("Tokio runtime already shut down")
         .handle()
         .clone()
+}
+pub(crate) fn config() -> &'static config::Config {
+    CONFIG.get().expect("Config not initialized")
 }
 
 #[aviutl2::plugin(InputPlugin)]
@@ -226,7 +228,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         let index = if should_create_index {
             tracing::info!("Creating index for file: {:?}", file);
             let start_time = std::time::Instant::now();
-            let json_index = CONFIG.get().is_some_and(|c| c.json_index);
+            let json_index = crate::config().json_index;
             let index =
                 index::create_index(&file, &index_header_path, &index_path, hash, json_index)
                     .with_context(|| format!("Failed to create index for file: {:?}", file))?;
@@ -314,15 +316,33 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
 
                 handle.current_video_track = Some(v.clone());
 
-                let fps = v.frames as f64 / v.duration;
-                const FPS_ACCURACY: i32 = 10i32.pow(3);
+                let cfg = config();
+                let fps_precision = 10i32.pow(cfg.fps_precision);
+                let real_fps = aviutl2::Rational32::new(
+                    (v.frames as f64 / v.duration * fps_precision as f64).round() as i32,
+                    fps_precision,
+                );
+                let fps_rational = match cfg.fps_mode {
+                    config::FpsMode::Metadata => {
+                        let (num, den) = v.metadata_framerate;
+                        if num == 0 || den == 0 {
+                            tracing::warn!(
+                                "Video track {} has invalid metadata framerate {}/{}. Falling back to real FPS.",
+                                video_track,
+                                num,
+                                den
+                            );
+                            real_fps
+                        } else {
+                            aviutl2::Rational32::new(num, den)
+                        }
+                    }
+                    config::FpsMode::Real => real_fps,
+                };
                 Some(aviutl2::input::VideoInputInfo {
                     width: v.width,
                     height: v.height,
-                    fps: aviutl2::Rational32::new(
-                        (fps * FPS_ACCURACY as f64).round() as i32,
-                        FPS_ACCURACY,
-                    ),
+                    fps: fps_rational,
                     num_frames: v.frames as _,
                     manual_frame_index: true,
                     format: match v.output_format {
@@ -337,14 +357,15 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         };
 
         // Update prefetch config whenever video track changes
-        let _ = handle.prefetch.config_tx.send(
-            handle.current_video_track.as_ref().map(|v| PrefetchConfig {
+        let _ = handle
+            .prefetch
+            .config_tx
+            .send(handle.current_video_track.as_ref().map(|v| PrefetchConfig {
                 video_index: std::sync::Arc::new(handle.video_index.clone()),
                 output_format: v.output_format.clone(),
                 width: v.width,
                 height: v.height,
-            }),
-        );
+            }));
         handle.prefetch.clear_cache();
 
         let audio = if let Some(a) = handle.index.audio_tracks().nth(audio_track as usize) {
@@ -441,8 +462,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             PREFETCH_TOTAL_BYTES.fetch_sub(data.len(), std::sync::atomic::Ordering::Relaxed);
             handle.prefetch.cache.retain(|&k, v| {
                 if k <= frame {
-                    PREFETCH_TOTAL_BYTES
-                        .fetch_sub(v.len(), std::sync::atomic::Ordering::Relaxed);
+                    PREFETCH_TOTAL_BYTES.fetch_sub(v.len(), std::sync::atomic::Ordering::Relaxed);
                     false
                 } else {
                     true

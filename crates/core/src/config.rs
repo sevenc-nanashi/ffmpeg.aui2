@@ -1,6 +1,14 @@
 const DEFAULT_CONFIG: &str = include_str!("./default_config.ini");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FpsMode {
+    /// Use avg_frame_rate from stream metadata as-is.
+    Metadata,
+    /// Compute FPS from frames / duration and round with fps_precision.
+    Real,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HwAccel {
     None,
     Auto,
@@ -20,6 +28,10 @@ pub struct Config {
     pub prefetch_total_buffer_mb: u32,
     /// Maximum number of frames to prefetch ahead (0 = no frame-count limit).
     pub prefetch_frames: u32,
+    /// FPS rounding precision: 0 = round to integer, n ≥ 1 = round to 10^(-n).
+    /// Only used when fps_mode = real.
+    pub fps_precision: u32,
+    pub fps_mode: FpsMode,
 }
 
 impl Default for Config {
@@ -31,6 +43,8 @@ impl Default for Config {
             prefetch_buffer_mb: 32,
             prefetch_total_buffer_mb: 512,
             prefetch_frames: 10,
+            fps_precision: 3,
+            fps_mode: FpsMode::Real,
         }
     }
 }
@@ -123,6 +137,18 @@ impl Config {
                         if let Ok(v) = value.parse::<u32>() {
                             config.prefetch_frames = v;
                         }
+                    }
+                    "fps_precision" => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            config.fps_precision = v;
+                        }
+                    }
+                    "fps_mode" => {
+                        config.fps_mode = match value.to_ascii_lowercase().as_str() {
+                            "metadata" => FpsMode::Metadata,
+                            "real" => FpsMode::Real,
+                            _ => FpsMode::Real,
+                        };
                     }
                     "hwaccel" => {
                         config.hwaccel = match value.to_ascii_lowercase().as_str() {

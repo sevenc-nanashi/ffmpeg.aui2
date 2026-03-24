@@ -90,6 +90,8 @@ pub struct VideoTrackInfo {
     pub frames: u64,
     pub duration: f64,
     pub output_format: VideoOutputFormat,
+    /// avg_frame_rate from the stream metadata (numerator, denominator).
+    pub metadata_framerate: (i32, i32),
 }
 #[derive(
     Debug,
@@ -232,12 +234,14 @@ pub fn create_index(
                     duration,
                     video.format()
                 );
+                let metadata_framerate = stream.rate();
                 Some(TrackInfo::Video(VideoTrackInfo {
                     stream_index: stream.index(),
                     width: video.width(),
                     height: video.height(),
                     frames: stream.frames().max(0) as u64,
                     duration,
+                    metadata_framerate: (metadata_framerate.numerator(), metadata_framerate.denominator()),
                     output_format: {
                         let is_hdr = matches!(
                             video.color_transfer_characteristic(),

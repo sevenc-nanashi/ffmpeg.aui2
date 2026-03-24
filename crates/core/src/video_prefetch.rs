@@ -80,7 +80,7 @@ async fn run_prefetch_task(
         };
         let frame_bytes = cfg.width as usize * cfg.height as usize * bytes_per_pixel;
 
-        let cfg_ref = crate::CONFIG.get().cloned().unwrap_or_default();
+        let cfg_ref = crate::config();
         let per_video_limit = cfg_ref.prefetch_buffer_mb as usize * 1024 * 1024;
         let total_limit = cfg_ref.prefetch_total_buffer_mb as usize * 1024 * 1024;
         let frame_count_limit = cfg_ref.prefetch_frames as usize;
