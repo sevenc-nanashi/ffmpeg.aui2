@@ -9,11 +9,17 @@ pub enum HwAccel {
     Cuda,
 }
 
+#[derive(Debug, Clone)]
 pub struct Config {
     pub log_level: tracing::Level,
     pub json_index: bool,
-    pub prefetch_buffer_mb: u32,
     pub hwaccel: HwAccel,
+    /// Per-video prefetch buffer size in MB (based on pixel format × resolution).
+    pub prefetch_buffer_mb: u32,
+    /// Total prefetch budget across all open videos in MB.
+    pub prefetch_total_buffer_mb: u32,
+    /// Maximum number of frames to prefetch ahead (0 = no frame-count limit).
+    pub prefetch_frames: u32,
 }
 
 impl Default for Config {
@@ -21,10 +27,42 @@ impl Default for Config {
         Self {
             log_level: tracing::Level::INFO,
             json_index: false,
-            prefetch_buffer_mb: 512,
             hwaccel: HwAccel::None,
+            prefetch_buffer_mb: 32,
+            prefetch_total_buffer_mb: 512,
+            prefetch_frames: 10,
         }
     }
+}
+
+/// Extracts blocks (comment lines + key=value line) keyed by their key name from an INI string.
+fn default_key_blocks() -> std::collections::HashMap<&'static str, String> {
+    let mut map = std::collections::HashMap::new();
+    let mut pending: Vec<&str> = Vec::new();
+
+    for line in DEFAULT_CONFIG.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(';') || trimmed.starts_with('#') || trimmed.is_empty() {
+            pending.push(line);
+        } else if let Some((key, _)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let mut block = String::new();
+            if !pending.is_empty() {
+                block.push('\n');
+            }
+            for comment in pending.drain(..) {
+                block.push_str(comment);
+                block.push('\n');
+            }
+            block.push_str(line);
+            block.push('\n');
+            map.insert(key, block);
+        } else {
+            pending.clear();
+        }
+    }
+
+    map
 }
 
 impl Config {
@@ -76,6 +114,16 @@ impl Config {
                             config.prefetch_buffer_mb = v;
                         }
                     }
+                    "prefetch_total_buffer_mb" => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            config.prefetch_total_buffer_mb = v;
+                        }
+                    }
+                    "prefetch_frames" => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            config.prefetch_frames = v;
+                        }
+                    }
                     "hwaccel" => {
                         config.hwaccel = match value.to_ascii_lowercase().as_str() {
                             "none" | "off" | "false" => HwAccel::None,
@@ -88,6 +136,31 @@ impl Config {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Append any keys present in the default config but missing from the file
+        let blocks = default_key_blocks();
+        let mut additions = String::new();
+        for (key, block) in &blocks {
+            let is_present = content.lines().any(|l| {
+                l.split_once('=')
+                    .is_some_and(|(k, _)| k.trim() == *key)
+            });
+            if !is_present {
+                aviutl2::lprintln!(
+                    warn,
+                    "Config key '{}' not found in {:?}, adding default",
+                    key,
+                    config_path
+                );
+                additions.push_str(block);
+            }
+        }
+        if !additions.is_empty() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(config_path) {
+                let _ = f.write_all(additions.as_bytes());
             }
         }
 

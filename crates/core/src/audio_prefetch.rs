@@ -159,14 +159,6 @@ fn read_audio_range(
         let copy_start = start_idx.max(buffer_start);
         let copy_end = end_idx.min(buffer_end);
 
-        tracing::debug!(
-            "Audio buffer range: {}-{}, requested range: {}-{}",
-            buffer_start,
-            buffer_end,
-            start_idx,
-            end_idx
-        );
-
         if copy_start < copy_end {
             let src_offset = (copy_start - buffer_start) * request.channels;
             let dst_offset = (copy_start - start_idx) * request.channels;

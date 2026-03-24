@@ -12,6 +12,9 @@ use video::VideoDecoderState;
 use video_prefetch::{PrefetchConfig, PrefetchHandle};
 
 pub(crate) static CONFIG: std::sync::OnceLock<config::Config> = std::sync::OnceLock::new();
+/// Total bytes currently held in all video prefetch caches.
+pub(crate) static PREFETCH_TOTAL_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 pub(crate) static RUNTIME: std::sync::OnceLock<
     std::sync::Mutex<Option<tokio::runtime::Runtime>>,
 > = std::sync::OnceLock::new();
@@ -342,7 +345,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                 height: v.height,
             }),
         );
-        handle.prefetch.cache.clear();
+        handle.prefetch.clear_cache();
 
         let audio = if let Some(a) = handle.index.audio_tracks().nth(audio_track as usize) {
             if a.duration <= 0.0 || a.samples == 0 {
@@ -435,7 +438,16 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
 
         // Check prefetch cache
         if let Some((_, data)) = handle.prefetch.cache.remove(&frame) {
-            handle.prefetch.cache.retain(|&k, _| k > frame);
+            PREFETCH_TOTAL_BYTES.fetch_sub(data.len(), std::sync::atomic::Ordering::Relaxed);
+            handle.prefetch.cache.retain(|&k, v| {
+                if k <= frame {
+                    PREFETCH_TOTAL_BYTES
+                        .fetch_sub(v.len(), std::sync::atomic::Ordering::Relaxed);
+                    false
+                } else {
+                    true
+                }
+            });
             returner.write(&data);
             return Ok(());
         }

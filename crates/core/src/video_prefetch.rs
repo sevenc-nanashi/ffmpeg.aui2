@@ -19,6 +19,7 @@ pub struct PrefetchHandle {
 impl Drop for PrefetchHandle {
     fn drop(&mut self) {
         self.task.abort();
+        self.clear_cache();
     }
 }
 
@@ -28,14 +29,20 @@ struct SendDecoder(Option<VideoDecoderState>);
 unsafe impl Send for SendDecoder {}
 
 impl PrefetchHandle {
+    pub fn clear_cache(&self) {
+        let total: usize = self.cache.iter().map(|e| e.value().len()).sum();
+        crate::PREFETCH_TOTAL_BYTES.fetch_sub(total, std::sync::atomic::Ordering::Relaxed);
+        self.cache.clear();
+    }
+
     pub fn new(path: std::path::PathBuf) -> Self {
         let cache = std::sync::Arc::new(dashmap::DashMap::new());
         let (config_tx, config_rx) = tokio::sync::watch::channel(None::<PrefetchConfig>);
         let (position_tx, position_rx) = tokio::sync::watch::channel(0usize);
 
         let cache_clone = std::sync::Arc::clone(&cache);
-        let task = crate::runtime()
-            .spawn(run_prefetch_task(config_rx, position_rx, cache_clone, path));
+        let task =
+            crate::runtime().spawn(run_prefetch_task(config_rx, position_rx, cache_clone, path));
 
         Self {
             cache,
@@ -72,13 +79,22 @@ async fn run_prefetch_task(
             index::VideoOutputFormat::Hf64 => 8,
         };
         let frame_bytes = cfg.width as usize * cfg.height as usize * bytes_per_pixel;
-        let prefetch_limit_bytes = crate::CONFIG
-            .get()
-            .map_or(512, |c| c.prefetch_buffer_mb) as usize
-            * 1024
-            * 1024;
+
+        let cfg_ref = crate::CONFIG.get().cloned().unwrap_or_default();
+        let per_video_limit = cfg_ref.prefetch_buffer_mb as usize * 1024 * 1024;
+        let total_limit = cfg_ref.prefetch_total_buffer_mb as usize * 1024 * 1024;
+        let frame_count_limit = cfg_ref.prefetch_frames as usize;
+
         let prefetch_frames = if frame_bytes > 0 {
-            prefetch_limit_bytes / frame_bytes
+            let from_per_video = per_video_limit / frame_bytes;
+            let already_used =
+                crate::PREFETCH_TOTAL_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+            let from_total = total_limit.saturating_sub(already_used) / frame_bytes;
+            let mut limit = from_per_video.min(from_total);
+            if frame_count_limit > 0 {
+                limit = limit.min(frame_count_limit);
+            }
+            limit
         } else {
             0
         };
@@ -157,6 +173,8 @@ async fn run_prefetch_task(
             match result {
                 Some((idx, ts, data)) => {
                     tracing::debug!("Prefetch: cached frame {idx} at timestamp {ts}");
+                    crate::PREFETCH_TOTAL_BYTES
+                        .fetch_add(data.len(), std::sync::atomic::Ordering::Relaxed);
                     cache.insert(idx, data);
                     did_work = true;
                 }
