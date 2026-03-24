@@ -42,6 +42,13 @@ pub enum TrackInfo {
     Audio(AudioTrackInfo),
 }
 
+#[derive(Debug, Clone, PartialEq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub enum VideoOutputFormat {
+    Bgra,
+    Yuy2,
+    Hf64,
+}
+
 #[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct VideoTrackInfo {
     pub stream_index: usize,
@@ -49,7 +56,7 @@ pub struct VideoTrackInfo {
     pub height: u32,
     pub frames: u64,
     pub duration: f64,
-    pub convert_to_yuv422: bool,
+    pub output_format: VideoOutputFormat,
 }
 #[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct AudioTrackInfo {
@@ -151,34 +158,56 @@ pub fn create_index(
                     height: video.height(),
                     frames: stream.frames().max(0) as u64,
                     duration: (stream.duration() as f64) * f64::from(stream.time_base()),
-                    // YUVっぽいフォーマットはYUV422に変換して扱うようにする（そのほうが速い）
-                    convert_to_yuv422: matches!(
-                        video.format(),
-                        ffmpeg_next::format::Pixel::YUV422P
-                        | ffmpeg_next::format::Pixel::YUYV422
-                        | ffmpeg_next::format::Pixel::UYVY422
-                        | ffmpeg_next::format::Pixel::YUV422P10
-                        | ffmpeg_next::format::Pixel::YUV422P12
-                        | ffmpeg_next::format::Pixel::YUV422P16
-                        | ffmpeg_next::format::Pixel::YUV422P9
-                        | ffmpeg_next::format::Pixel::YUV422P14
-                        | ffmpeg_next::format::Pixel::YUV420P
-                        | ffmpeg_next::format::Pixel::YUV420P10
-                        | ffmpeg_next::format::Pixel::YUV420P12
-                        | ffmpeg_next::format::Pixel::YUV420P16
-                        | ffmpeg_next::format::Pixel::YUV420P9
-                        | ffmpeg_next::format::Pixel::YUV420P14
-                        | ffmpeg_next::format::Pixel::YUV422P16BE
-                        | ffmpeg_next::format::Pixel::YUV422P16LE
-                        | ffmpeg_next::format::Pixel::YUV422P10BE
-                        | ffmpeg_next::format::Pixel::YUV422P10LE
-                        | ffmpeg_next::format::Pixel::YUV422P12BE
-                        | ffmpeg_next::format::Pixel::YUV422P12LE
-                        | ffmpeg_next::format::Pixel::YUV422P14BE
-                        | ffmpeg_next::format::Pixel::YUV422P14LE
-                        | ffmpeg_next::format::Pixel::YUV422P9BE
-                        | ffmpeg_next::format::Pixel::YUV422P9LE
-                    ),
+                    output_format: {
+                        let is_hdr = matches!(
+                            video.color_transfer_characteristic(),
+                            ffmpeg_next::color::TransferCharacteristic::SMPTE2084
+                            | ffmpeg_next::color::TransferCharacteristic::ARIB_STD_B67
+                        );
+                        // YUVっぽいフォーマットはYUV422に変換して扱うようにする（そのほうが速い）
+                        let is_yuv = matches!(
+                            video.format(),
+                            ffmpeg_next::format::Pixel::YUV422P
+                            | ffmpeg_next::format::Pixel::YUYV422
+                            | ffmpeg_next::format::Pixel::UYVY422
+                            | ffmpeg_next::format::Pixel::YUV422P10
+                            | ffmpeg_next::format::Pixel::YUV422P12
+                            | ffmpeg_next::format::Pixel::YUV422P16
+                            | ffmpeg_next::format::Pixel::YUV422P9
+                            | ffmpeg_next::format::Pixel::YUV422P14
+                            | ffmpeg_next::format::Pixel::YUV420P
+                            | ffmpeg_next::format::Pixel::YUV420P10
+                            | ffmpeg_next::format::Pixel::YUV420P12
+                            | ffmpeg_next::format::Pixel::YUV420P16
+                            | ffmpeg_next::format::Pixel::YUV420P9
+                            | ffmpeg_next::format::Pixel::YUV420P14
+                            | ffmpeg_next::format::Pixel::YUV422P16BE
+                            | ffmpeg_next::format::Pixel::YUV422P16LE
+                            | ffmpeg_next::format::Pixel::YUV422P10BE
+                            | ffmpeg_next::format::Pixel::YUV422P10LE
+                            | ffmpeg_next::format::Pixel::YUV422P12BE
+                            | ffmpeg_next::format::Pixel::YUV422P12LE
+                            | ffmpeg_next::format::Pixel::YUV422P14BE
+                            | ffmpeg_next::format::Pixel::YUV422P14LE
+                            | ffmpeg_next::format::Pixel::YUV422P9BE
+                            | ffmpeg_next::format::Pixel::YUV422P9LE
+                        );
+                        let format = if is_hdr {
+                            VideoOutputFormat::Hf64
+                        } else if is_yuv {
+                            VideoOutputFormat::Yuy2
+                        } else {
+                            VideoOutputFormat::Bgra
+                        };
+                        tracing::info!(
+                            "Determined output format for stream {}: {:?} (is_hdr={}, is_yuv={})",
+                            stream.index(),
+                            format,
+                            is_hdr,
+                            is_yuv
+                        );
+                        format
+                    },
                 }))
             }
             ffmpeg_next::media::Type::Audio => {

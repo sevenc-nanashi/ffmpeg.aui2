@@ -1,10 +1,13 @@
+use crate::index::VideoOutputFormat;
 use anyhow::Context;
+use aviutl2::f16;
 
 pub struct VideoDecoderState {
     pub input: ffmpeg_next::format::context::Input,
     pub decoder: ffmpeg_next::decoder::Video,
     pub scaler: Option<ffmpeg_next::software::scaling::Context>,
     pub filter_graph: Option<ffmpeg_next::filter::Graph>,
+    pub hdr_filter_graph: Option<ffmpeg_next::filter::Graph>,
     pub stream_index: usize,
     pub time_base: ffmpeg_next::Rational,
     pub current_ts: f64,
@@ -46,6 +49,7 @@ impl VideoDecoderState {
             decoder,
             scaler: None,
             filter_graph: None,
+            hdr_filter_graph: None,
             stream_index,
             time_base,
             current_ts: f64::NEG_INFINITY,
@@ -106,14 +110,14 @@ impl VideoDecoderState {
         Ok(frame)
     }
 
-    pub fn ensure_scaler(&mut self, convert_to_yuv422: bool) -> anyhow::Result<()> {
+    pub fn ensure_scaler(&mut self, output_format: &VideoOutputFormat) -> anyhow::Result<()> {
         if self.scaler.is_none() {
             let width = self.decoder.width();
             let height = self.decoder.height();
-            let dst_fmt = if convert_to_yuv422 {
-                ffmpeg_next::format::Pixel::YUYV422
-            } else {
-                ffmpeg_next::format::Pixel::BGRA
+            let dst_fmt = match output_format {
+                VideoOutputFormat::Yuy2 => ffmpeg_next::format::Pixel::YUYV422,
+                VideoOutputFormat::Bgra => ffmpeg_next::format::Pixel::BGRA,
+                VideoOutputFormat::Hf64 => ffmpeg_next::format::Pixel::GBRPF32LE,
             };
             self.scaler = Some(
                 ffmpeg_next::software::scaling::Context::get(
@@ -218,16 +222,82 @@ impl VideoDecoderState {
         Ok(output)
     }
 
+    fn ensure_hdr_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
+        if self.hdr_filter_graph.is_some() {
+            return Ok(());
+        }
+
+        let args = format!(
+            "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect=1/1",
+            frame.width(),
+            frame.height(),
+            ffmpeg_next::ffi::AVPixelFormat::from(frame.format()) as i32,
+            self.time_base.numerator(),
+            self.time_base.denominator(),
+        );
+
+        let mut graph = ffmpeg_next::filter::Graph::new();
+        graph.add(
+            &ffmpeg_next::filter::find("buffer").context("buffer filter not found")?,
+            "in",
+            &args,
+        )?;
+        graph.add(
+            &ffmpeg_next::filter::find("buffersink").context("buffersink filter not found")?,
+            "out",
+            "",
+        )?;
+        graph
+            .output("in", 0)?
+            .input("out", 0)?
+            .parse("zscale=transfer=linear:range=full:rangein=full,format=pix_fmts=gbrpf32le")?;
+        graph.validate()?;
+
+        self.hdr_filter_graph = Some(graph);
+        Ok(())
+    }
+
+    fn apply_hdr_to_hf64(
+        &mut self,
+        frame: &ffmpeg_next::frame::Video,
+    ) -> anyhow::Result<ffmpeg_next::frame::Video> {
+        self.ensure_hdr_filter(frame)?;
+        let graph = self.hdr_filter_graph.as_mut().unwrap();
+
+        graph
+            .get("in")
+            .unwrap()
+            .source()
+            .add(frame)
+            .context("Failed to add HDR frame to filter graph")?;
+
+        let mut output = ffmpeg_next::frame::Video::empty();
+        graph
+            .get("out")
+            .unwrap()
+            .sink()
+            .frame(&mut output)
+            .context("Failed to get HDR frame from filter graph")?;
+
+        Ok(output)
+    }
+
     /// Decode frame → (optionally vflip via avfilter) → scale → return pixel bytes. Does NOT touch prefetch.
     pub fn frame_to_bytes(
         &mut self,
         frame: &ffmpeg_next::frame::Video,
-        convert_to_yuv422: bool,
+        output_format: &VideoOutputFormat,
     ) -> anyhow::Result<Vec<u8>> {
-        self.ensure_scaler(convert_to_yuv422)?;
+        if matches!(output_format, VideoOutputFormat::Hf64) && is_hdr_transfer(frame) {
+            let scaled = self.apply_hdr_to_hf64(frame)?;
+            return Self::hf64_frame_to_bytes(&scaled);
+        }
 
+        self.ensure_scaler(output_format)?;
+
+        let needs_vflip = matches!(output_format, VideoOutputFormat::Bgra);
         let flipped;
-        let frame_to_scale = if !convert_to_yuv422 {
+        let frame_to_scale = if needs_vflip {
             flipped = self.apply_vflip(frame)?;
             &flipped
         } else {
@@ -235,7 +305,11 @@ impl VideoDecoderState {
         };
 
         let scaler = self.scaler.as_mut().unwrap();
-        if !convert_to_yuv422 {
+        let is_rgb_output = matches!(
+            output_format,
+            VideoOutputFormat::Bgra | VideoOutputFormat::Hf64
+        );
+        if is_rgb_output {
             Self::configure_rgb_scaler_colorspace(scaler, frame_to_scale)?;
         }
         let mut scaled = ffmpeg_next::frame::Video::empty();
@@ -243,44 +317,88 @@ impl VideoDecoderState {
             .run(frame_to_scale, &mut scaled)
             .context("Failed to scale frame")?;
 
-        if !convert_to_yuv422 {
-            scaled.set_color_space(ffmpeg_next::color::Space::RGB);
-            scaled.set_color_range(ffmpeg_next::color::Range::JPEG);
-            scaled.set_color_primaries(frame_to_scale.color_primaries());
-            scaled
-                .set_color_transfer_characteristic(frame_to_scale.color_transfer_characteristic());
+        let w = scaled.width() as usize;
+        let h = scaled.height() as usize;
+
+        match output_format {
+            VideoOutputFormat::Yuy2 => {
+                let data = scaled.data(0);
+                let stride = scaled.stride(0);
+                let bpr = w * 2;
+                let mut packed = vec![0u8; h * bpr];
+                if stride == bpr {
+                    packed.copy_from_slice(&data[..h * bpr]);
+                } else {
+                    packed.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
+                        let src = y * stride;
+                        dst.copy_from_slice(&data[src..src + bpr]);
+                    });
+                }
+                Ok(packed)
+            }
+            VideoOutputFormat::Bgra => {
+                let data = scaled.data(0);
+                let stride = scaled.stride(0);
+                let bpr = w * 4;
+                let mut output = vec![0u8; h * bpr];
+                if stride == bpr {
+                    output.copy_from_slice(&data[..h * bpr]);
+                } else {
+                    output.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
+                        let src = y * stride;
+                        dst.copy_from_slice(&data[src..src + bpr]);
+                    });
+                }
+                Ok(output)
+            }
+            VideoOutputFormat::Hf64 => Self::hf64_frame_to_bytes(&scaled),
         }
+    }
+
+    fn hf64_frame_to_bytes(scaled: &ffmpeg_next::frame::Video) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(
+            scaled.format() == ffmpeg_next::format::Pixel::GBRPF32LE,
+            "Unexpected pixel format for Hf64 conversion: {:?}",
+            scaled.format()
+        );
 
         let w = scaled.width() as usize;
         let h = scaled.height() as usize;
-        let data = scaled.data(0);
-        let stride = scaled.stride(0);
+        let g_data = scaled.data(0);
+        let b_data = scaled.data(1);
+        let r_data = scaled.data(2);
+        let g_stride = scaled.stride(0);
+        let b_stride = scaled.stride(1);
+        let r_stride = scaled.stride(2);
+        let alpha_bytes = f16::from_f32(1.0).to_le_bytes();
+        let mut output = vec![0u8; h * w * 8];
 
-        if convert_to_yuv422 {
-            let bpr = w * 2;
-            let mut packed = vec![0u8; h * bpr];
-            if stride == bpr {
-                packed.copy_from_slice(&data[..h * bpr]);
-            } else {
-                packed.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
-                    let src = y * stride;
-                    dst.copy_from_slice(&data[src..src + bpr]);
-                });
+        for y in 0..h {
+            for x in 0..w {
+                let r = f32::from_le_bytes(
+                    r_data[y * r_stride + x * 4..y * r_stride + x * 4 + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                let g = f32::from_le_bytes(
+                    g_data[y * g_stride + x * 4..y * g_stride + x * 4 + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                let b = f32::from_le_bytes(
+                    b_data[y * b_stride + x * 4..y * b_stride + x * 4 + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                let off = (y * w + x) * 8;
+                output[off..off + 2].copy_from_slice(&f16::from_f32(r).to_le_bytes());
+                output[off + 2..off + 4].copy_from_slice(&f16::from_f32(g).to_le_bytes());
+                output[off + 4..off + 6].copy_from_slice(&f16::from_f32(b).to_le_bytes());
+                output[off + 6..off + 8].copy_from_slice(&alpha_bytes);
             }
-            Ok(packed)
-        } else {
-            let bpr = w * 4;
-            let mut output = vec![0u8; h * bpr];
-            if stride == bpr {
-                output.copy_from_slice(&data[..h * bpr]);
-            } else {
-                output.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
-                    let src = y * stride;
-                    dst.copy_from_slice(&data[src..src + bpr]);
-                });
-            }
-            Ok(output)
         }
+
+        Ok(output)
     }
 }
 
@@ -311,4 +429,12 @@ fn swscale_range(range: ffmpeg_next::color::Range) -> i32 {
         ffmpeg_next::color::Range::JPEG => 1,
         ffmpeg_next::color::Range::MPEG | ffmpeg_next::color::Range::Unspecified => 0,
     }
+}
+
+fn is_hdr_transfer(frame: &ffmpeg_next::frame::Video) -> bool {
+    matches!(
+        frame.color_transfer_characteristic(),
+        ffmpeg_next::color::TransferCharacteristic::SMPTE2084
+            | ffmpeg_next::color::TransferCharacteristic::ARIB_STD_B67
+    )
 }
