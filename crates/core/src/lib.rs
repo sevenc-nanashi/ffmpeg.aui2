@@ -1,12 +1,14 @@
 mod audio;
+mod audio_prefetch;
 mod index;
-mod prefetch;
 mod video;
+mod video_prefetch;
 use std::hash::Hasher;
 use std::sync::atomic::Ordering;
 
 use anyhow::Context;
-use prefetch::{AudioPrefetchHandle, AudioPrefetchRequest, PrefetchConfig, PrefetchHandle};
+use audio_prefetch::{AudioPrefetchHandle, AudioPrefetchRequest};
+use video_prefetch::{PrefetchConfig, PrefetchHandle};
 use video::VideoDecoderState;
 
 #[aviutl2::plugin(InputPlugin)]
