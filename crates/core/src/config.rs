@@ -3,6 +3,7 @@ const DEFAULT_CONFIG: &str = include_str!("./default_config.ini");
 pub struct Config {
     pub log_level: tracing::Level,
     pub json_index: bool,
+    pub prefetch_buffer_mb: u32,
 }
 
 impl Default for Config {
@@ -10,6 +11,7 @@ impl Default for Config {
         Self {
             log_level: tracing::Level::INFO,
             json_index: false,
+            prefetch_buffer_mb: 512,
         }
     }
 }
@@ -57,6 +59,11 @@ impl Config {
                     "json_index" => {
                         config.json_index =
                             matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
+                    }
+                    "prefetch_buffer_mb" => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            config.prefetch_buffer_mb = v;
+                        }
                     }
                     _ => {}
                 }

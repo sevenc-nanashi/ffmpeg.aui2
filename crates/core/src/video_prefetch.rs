@@ -7,6 +7,8 @@ use crate::video::VideoDecoderState;
 pub struct PrefetchConfig {
     pub video_index: std::sync::Arc<Vec<index::VideoEntry>>,
     pub output_format: index::VideoOutputFormat,
+    pub width: u32,
+    pub height: u32,
 }
 
 pub struct PrefetchHandle {
@@ -62,14 +64,26 @@ fn run_prefetch_thread(
             None => continue,
         };
 
+        let bytes_per_pixel = match cfg.output_format {
+            index::VideoOutputFormat::Yuy2 => 2usize,
+            index::VideoOutputFormat::Bgra => 4,
+            index::VideoOutputFormat::Hf64 => 8,
+        };
+        let frame_bytes = cfg.width as usize * cfg.height as usize * bytes_per_pixel;
+        let prefetch_limit_bytes = crate::CONFIG.get().map_or_else(
+            || crate::config::Config::default().prefetch_buffer_mb,
+            |c| c.prefetch_buffer_mb,
+        ) as usize
+            * 1024
+            * 1024;
+        let prefetch_frames = if frame_bytes > 0 {
+            prefetch_limit_bytes / frame_bytes
+        } else {
+            0
+        };
+
         let mut current = position.load(Ordering::Relaxed);
-        let mut start_ts = cfg
-            .video_index
-            .get(current)
-            .map(|e| e.timestamp)
-            .unwrap_or(0.0);
-        const PREFETCH_DURATION: f64 = 0.1;
-        let mut end_ts = start_ts + PREFETCH_DURATION;
+        let mut end_frame = current + prefetch_frames;
         let next_frame = current + 1;
 
         for (i, entry) in cfg.video_index[next_frame.min(cfg.video_index.len())..]
@@ -78,23 +92,16 @@ fn run_prefetch_thread(
         {
             let new_current = position.load(Ordering::Relaxed);
             if new_current != current {
-                let new_ts = cfg
-                    .video_index
-                    .get(new_current)
-                    .map(|e| e.timestamp)
-                    .unwrap_or(f64::MAX);
-                if new_ts > end_ts {
+                if new_current > end_frame {
                     break;
                 }
                 current = new_current;
-                start_ts = new_ts;
-                end_ts = start_ts + PREFETCH_DURATION;
+                end_frame = current + prefetch_frames;
             }
-            if entry.timestamp > end_ts {
+            let frame_idx = next_frame + i;
+            if frame_idx > end_frame {
                 break;
             }
-
-            let frame_idx = next_frame + i;
 
             if cache.contains_key(&frame_idx) {
                 continue;

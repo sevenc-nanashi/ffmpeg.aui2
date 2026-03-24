@@ -111,8 +111,8 @@ fn read_audio_range(
                 .find(|e| e.stream_index == request.stream_index && e.start_sample as usize <= start_idx);
 
             if let Some(entry) = entry {
-                tracing::info!(
-                    "Audio: seeking to timestamp {} (sample {})",
+                tracing::debug!(
+                    "seeking to timestamp {} (sample {})",
                     entry.timestamp,
                     entry.start_sample
                 );

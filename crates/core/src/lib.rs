@@ -146,6 +146,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             concurrent: true,
             file_filters: aviutl2::file_filters! {
                 "Video Files" => ["mp4", "mkv", "avi", "mov", "flv"],
+                "Audio Files" => ["mp3", "aac", "flac", "wav", "ogg"],
             },
             can_config: true,
         }
@@ -315,6 +316,8 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             handle.current_video_track.as_ref().map(|v| PrefetchConfig {
                 video_index: std::sync::Arc::new(handle.video_index.clone()),
                 output_format: v.output_format.clone(),
+                width: v.width,
+                height: v.height,
             });
         handle.prefetch.cache.clear();
 

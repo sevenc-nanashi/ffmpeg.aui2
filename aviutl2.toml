@@ -19,10 +19,6 @@ catalog_dependencies = [
   "sevenc-nanashi.aviutl2-rs.rusty_statistics"
 ]
 
-[artifacts.config]
-destination = "Plugin/ffmpeg-aui2/config.ini"
-source = "./config.ini"
-
 [artifacts.fix_hdr]
 destination = "Script/HDR修正.anm2"
 source = "./fix_hdr.lua"
