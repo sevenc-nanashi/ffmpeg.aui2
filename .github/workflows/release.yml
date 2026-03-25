@@ -44,7 +44,7 @@ jobs:
         run: |
           mkdir release
           cargo set-version "${{ github.event.inputs.version }}"
-          au2 release --set-version "${{ github.event.inputs.version }}"
+          FFMPEG_DIR='${ github.workspace }/ffmpeg' au2 release --set-version "${{ github.event.inputs.version }}"
 
       - name: Commit version change
         run: |
