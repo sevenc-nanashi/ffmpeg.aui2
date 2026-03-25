@@ -49,14 +49,24 @@ impl Default for Config {
     }
 }
 
-/// Extracts blocks (comment lines + key=value line) keyed by their key name from an INI string.
-fn default_key_blocks() -> std::collections::HashMap<&'static str, String> {
-    let mut map = std::collections::HashMap::new();
+struct KeyEntry {
+    key: &'static str,
+    section: &'static str,
+    block: String,
+}
+
+/// Extracts (key, section, block) entries from DEFAULT_CONFIG in order.
+fn default_key_entries() -> Vec<KeyEntry> {
+    let mut entries = Vec::new();
     let mut pending: Vec<&str> = Vec::new();
+    let mut current_section = "";
 
     for line in DEFAULT_CONFIG.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with(';') || trimmed.starts_with('#') || trimmed.is_empty() {
+        if let Some(s) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            current_section = s;
+            pending.clear();
+        } else if trimmed.starts_with(';') || trimmed.starts_with('#') || trimmed.is_empty() {
             pending.push(line);
         } else if let Some((key, _)) = trimmed.split_once('=') {
             let key = key.trim();
@@ -70,13 +80,17 @@ fn default_key_blocks() -> std::collections::HashMap<&'static str, String> {
             }
             block.push_str(line);
             block.push('\n');
-            map.insert(key, block);
+            entries.push(KeyEntry {
+                key,
+                section: current_section,
+                block,
+            });
         } else {
             pending.clear();
         }
     }
 
-    map
+    entries
 }
 
 impl Config {
@@ -96,20 +110,21 @@ impl Config {
             }
         };
 
+        let mut current_section = "";
         for line in content.lines() {
             let line = line.trim();
-            if line.starts_with(';')
-                || line.starts_with('#')
-                || line.starts_with('[')
-                || line.is_empty()
-            {
+            if let Some(s) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                current_section = s;
+                continue;
+            }
+            if line.starts_with(';') || line.starts_with('#') || line.is_empty() {
                 continue;
             }
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim();
                 let value = value.trim();
-                match key {
-                    "log_level" => {
+                match (current_section, key) {
+                    ("general", "log_level") => {
                         config.log_level = match value.to_ascii_lowercase().as_str() {
                             "trace" => tracing::Level::TRACE,
                             "debug" => tracing::Level::DEBUG,
@@ -119,38 +134,11 @@ impl Config {
                             _ => tracing::Level::INFO,
                         };
                     }
-                    "json_index" => {
+                    ("general", "json_index") => {
                         config.json_index =
                             matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
                     }
-                    "prefetch_buffer_mb" => {
-                        if let Ok(v) = value.parse::<u32>() {
-                            config.prefetch_buffer_mb = v;
-                        }
-                    }
-                    "prefetch_total_buffer_mb" => {
-                        if let Ok(v) = value.parse::<u32>() {
-                            config.prefetch_total_buffer_mb = v;
-                        }
-                    }
-                    "prefetch_frames" => {
-                        if let Ok(v) = value.parse::<u32>() {
-                            config.prefetch_frames = v;
-                        }
-                    }
-                    "fps_precision" => {
-                        if let Ok(v) = value.parse::<u32>() {
-                            config.fps_precision = v;
-                        }
-                    }
-                    "fps_mode" => {
-                        config.fps_mode = match value.to_ascii_lowercase().as_str() {
-                            "metadata" => FpsMode::Metadata,
-                            "real" => FpsMode::Real,
-                            _ => FpsMode::Real,
-                        };
-                    }
-                    "hwaccel" => {
+                    ("general", "hwaccel") => {
                         config.hwaccel = match value.to_ascii_lowercase().as_str() {
                             "none" | "off" | "false" => HwAccel::None,
                             "auto" => HwAccel::Auto,
@@ -160,27 +148,64 @@ impl Config {
                             _ => HwAccel::None,
                         };
                     }
+                    ("general", "fps_mode") => {
+                        config.fps_mode = match value.to_ascii_lowercase().as_str() {
+                            "metadata" => FpsMode::Metadata,
+                            "real" => FpsMode::Real,
+                            _ => FpsMode::Real,
+                        };
+                    }
+                    ("general", "fps_precision") => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            config.fps_precision = v;
+                        }
+                    }
+                    ("prefetch", "prefetch_buffer_mb") => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            config.prefetch_buffer_mb = v;
+                        }
+                    }
+                    ("prefetch", "prefetch_total_buffer_mb") => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            config.prefetch_total_buffer_mb = v;
+                        }
+                    }
+                    ("prefetch", "prefetch_frames") => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            config.prefetch_frames = v;
+                        }
+                    }
                     _ => {}
                 }
             }
         }
 
-        // Append any keys present in the default config but missing from the file
-        let blocks = default_key_blocks();
+        // Append any keys present in the default config but missing from the file.
+        // Keys are grouped by section; a [section] header is written before the first
+        // missing key of each section.
+        let entries = default_key_entries();
         let mut additions = String::new();
-        for (key, block) in &blocks {
+        let mut last_section = "";
+        for entry in &entries {
             let is_present = content.lines().any(|l| {
                 l.split_once('=')
-                    .is_some_and(|(k, _)| k.trim() == *key)
+                    .is_some_and(|(k, _)| k.trim() == entry.key)
             });
             if !is_present {
                 aviutl2::lprintln!(
                     warn,
                     "Config key '{}' not found in {:?}, adding default",
-                    key,
+                    entry.key,
                     config_path
                 );
-                additions.push_str(block);
+                if entry.section != last_section {
+                    additions.push('\n');
+                    additions.push('[');
+                    additions.push_str(entry.section);
+                    additions.push_str("]\n");
+                    last_section = entry.section;
+                }
+                additions.push_str(&entry.block);
             }
         }
         if !additions.is_empty() {
