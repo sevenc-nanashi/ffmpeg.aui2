@@ -43,6 +43,7 @@ jobs:
         shell: bash
         run: |
           mkdir release
+          ruby download_ffmpeg.rb
           cargo set-version "${{ github.event.inputs.version }}"
           FFMPEG_DIR='${{ github.workspace }}/ffmpeg' au2 release --set-version "${{ github.event.inputs.version }}"
 
