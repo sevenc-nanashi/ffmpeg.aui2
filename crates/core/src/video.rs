@@ -2,6 +2,7 @@ use crate::config::HwAccel;
 use crate::index::VideoOutputFormat;
 use anyhow::Context;
 use aviutl2::f16;
+use rayon::prelude::*;
 
 pub struct VideoDecoderState {
     pub input: ffmpeg_next::format::context::Input,
@@ -13,6 +14,8 @@ pub struct VideoDecoderState {
     pub time_base: ffmpeg_next::Rational,
     pub current_ts: f64,
     is_hw: bool,
+    /// Cached (colorspace, range) to avoid redundant sws_setColorspaceDetails calls.
+    cached_colorspace: Option<(i32, i32)>,
 }
 
 impl VideoDecoderState {
@@ -58,6 +61,7 @@ impl VideoDecoderState {
             time_base,
             current_ts: f64::NEG_INFINITY,
             is_hw,
+            cached_colorspace: None,
         })
     }
 
@@ -304,7 +308,12 @@ impl VideoDecoderState {
             VideoOutputFormat::Bgra | VideoOutputFormat::Hf64
         );
         if is_rgb_output {
-            Self::configure_rgb_scaler_colorspace(scaler, frame_to_scale)?;
+            let colorspace = swscale_colorspace(frame_to_scale);
+            let range = swscale_range(frame_to_scale.color_range());
+            if self.cached_colorspace != Some((colorspace, range)) {
+                Self::configure_rgb_scaler_colorspace(scaler, frame_to_scale)?;
+                self.cached_colorspace = Some((colorspace, range));
+            }
         }
         let mut scaled = ffmpeg_next::frame::Video::empty();
         scaler
@@ -367,7 +376,7 @@ impl VideoDecoderState {
         let alpha_bytes = f16::from_f32(1.0).to_le_bytes();
         let mut output = vec![0u8; h * w * 8];
 
-        for y in 0..h {
+        output.par_chunks_mut(w * 8).enumerate().for_each(|(y, row)| {
             let r_row = &r_data[y * r_stride..y * r_stride + w * 4];
             let g_row = &g_data[y * g_stride..y * g_stride + w * 4];
             let b_row = &b_data[y * b_stride..y * b_stride + w * 4];
@@ -380,13 +389,13 @@ impl VideoDecoderState {
                 let r = f32::from_le_bytes(r_bytes.try_into().unwrap());
                 let g = f32::from_le_bytes(g_bytes.try_into().unwrap());
                 let b = f32::from_le_bytes(b_bytes.try_into().unwrap());
-                let off = (y * w + x) * 8;
-                output[off..off + 2].copy_from_slice(&f16::from_f32(r).to_le_bytes());
-                output[off + 2..off + 4].copy_from_slice(&f16::from_f32(g).to_le_bytes());
-                output[off + 4..off + 6].copy_from_slice(&f16::from_f32(b).to_le_bytes());
-                output[off + 6..off + 8].copy_from_slice(&alpha_bytes);
+                let off = x * 8;
+                row[off..off + 2].copy_from_slice(&f16::from_f32(r).to_le_bytes());
+                row[off + 2..off + 4].copy_from_slice(&f16::from_f32(g).to_le_bytes());
+                row[off + 4..off + 6].copy_from_slice(&f16::from_f32(b).to_le_bytes());
+                row[off + 6..off + 8].copy_from_slice(&alpha_bytes);
             }
-        }
+        });
 
         Ok(output)
     }

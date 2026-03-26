@@ -32,6 +32,8 @@ pub struct Config {
     /// Only used when fps_mode = real.
     pub fps_precision: u32,
     pub fps_mode: FpsMode,
+    /// If true, hash only file size + mtime + first/last 256 KB instead of the full file.
+    pub rough_cache: bool,
 }
 
 impl Default for Config {
@@ -45,6 +47,7 @@ impl Default for Config {
             prefetch_frames: 10,
             fps_precision: 3,
             fps_mode: FpsMode::Real,
+            rough_cache: false,
         }
     }
 }
@@ -159,6 +162,10 @@ impl Config {
                         if let Ok(v) = value.parse::<u32>() {
                             config.fps_precision = v;
                         }
+                    }
+                    ("general", "rough_cache") => {
+                        config.rough_cache =
+                            matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
                     }
                     ("prefetch", "prefetch_buffer_mb") => {
                         if let Ok(v) = value.parse::<u32>() {

@@ -41,8 +41,8 @@ struct FfmpegAui2 {
 struct FfmpegAui2InputHandle {
     path: std::path::PathBuf,
     index: index::IndexContentFile,
-    video_index: Vec<index::VideoEntry>,
-    audio_index: Vec<index::AudioEntry>,
+    video_index: std::sync::Arc<Vec<index::VideoEntry>>,
+    audio_index: std::sync::Arc<Vec<index::AudioEntry>>,
     current_video_track: Option<index::VideoTrackInfo>,
     current_audio_track: Option<index::AudioTrackInfo>,
     video_decoder: std::sync::Mutex<Option<VideoDecoderState>>,
@@ -180,12 +180,38 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
     }
 
     fn open(&self, file: std::path::PathBuf) -> aviutl2::AnyResult<Self::InputHandle> {
-        ffmpeg_next::format::input(&file)?;
         tracing::info!("Opened file: {:?}", file);
-        let mut hash = xxhash_rust::xxh3::Xxh3Default::new();
-        let mut reader = std::fs::File::open(&file)?;
-        std::io::copy(&mut reader, &mut hash)?;
-        let hash = hash.finish();
+        const ROUGH_CACHE_CHUNK: usize = 256 * 1024;
+        let hash = if crate::config().rough_cache {
+            use std::io::{Read, Seek};
+            let meta = std::fs::metadata(&file)?;
+            let file_size = meta.len();
+            let modified = meta
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            let mut hasher = xxhash_rust::xxh3::Xxh3Default::new();
+            use std::hash::Hasher;
+            hasher.write_u64(file_size);
+            hasher.write_u64(modified);
+            let mut reader = std::fs::File::open(&file)?;
+            let mut buf = vec![0u8; ROUGH_CACHE_CHUNK];
+            let n = reader.read(&mut buf)?;
+            hasher.write(&buf[..n]);
+            if file_size > (ROUGH_CACHE_CHUNK * 2) as u64 {
+                reader.seek(std::io::SeekFrom::End(-(ROUGH_CACHE_CHUNK as i64)))?;
+                let n = reader.read(&mut buf)?;
+                hasher.write(&buf[..n]);
+            }
+            hasher.finish()
+        } else {
+            let mut hash = xxhash_rust::xxh3::Xxh3Default::new();
+            let mut reader = std::fs::File::open(&file)?;
+            std::io::copy(&mut reader, &mut hash)?;
+            hash.finish()
+        };
+        // ファイルが実際に開けるかチェック（インデックス作成前にエラーを早期検出）
+        ffmpeg_next::format::input(&file)?;
         tracing::info!("File {:?} has XXH3 hash: {:016x}", file, hash);
 
         let index_header_path = index_dir().join(format!("{:016x}.header.json", hash));
@@ -263,8 +289,8 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             prefetch: PrefetchHandle::new(file.clone()),
             path: file,
             index,
-            video_index: vec![],
-            audio_index: vec![],
+            video_index: std::sync::Arc::new(vec![]),
+            audio_index: std::sync::Arc::new(vec![]),
             current_video_track: None,
             current_audio_track: None,
             video_decoder: std::sync::Mutex::new(None),
@@ -293,7 +319,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                 handle.current_video_track = None;
                 None
             } else {
-                handle.video_index = handle
+                let mut video_index: Vec<_> = handle
                     .index
                     .entries
                     .iter()
@@ -301,9 +327,8 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                     .filter_map(|e| e.as_video().cloned())
                     .collect();
                 // Sort by PTS (display order) — packet order is DTS which differs for B-frames
-                handle
-                    .video_index
-                    .sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                video_index.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                handle.video_index = std::sync::Arc::new(video_index);
 
                 // Invalidate cached decoder if stream changed
                 let mut vd = handle.video_decoder.lock().unwrap();
@@ -357,11 +382,12 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         };
 
         // Update prefetch config whenever video track changes
+        let video_index_arc = std::sync::Arc::clone(&handle.video_index);
         let _ = handle
             .prefetch
             .config_tx
             .send(handle.current_video_track.as_ref().map(|v| PrefetchConfig {
-                video_index: std::sync::Arc::new(handle.video_index.clone()),
+                video_index: video_index_arc,
                 output_format: v.output_format.clone(),
                 width: v.width,
                 height: v.height,
@@ -379,16 +405,15 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                 handle.current_audio_track = None;
                 None
             } else {
-                handle.audio_index = handle
+                let mut audio_index: Vec<_> = handle
                     .index
                     .entries
                     .iter()
                     .filter(|e| e.stream_index() == a.stream_index)
                     .filter_map(|e| e.as_audio().cloned())
                     .collect();
-                handle
-                    .audio_index
-                    .sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                audio_index.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                handle.audio_index = std::sync::Arc::new(audio_index);
 
                 // Invalidate cached decoder if stream changed
                 handle.current_audio_track = Some(a.clone());
@@ -519,7 +544,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         let start_idx = start.max(0) as usize;
         let sample_count = length.max(0) as usize;
         let samples = handle.audio_prefetch.read(AudioPrefetchRequest {
-            audio_index: std::sync::Arc::new(handle.audio_index.clone()),
+            audio_index: std::sync::Arc::clone(&handle.audio_index),
             stream_index,
             sample_rate,
             channels,
