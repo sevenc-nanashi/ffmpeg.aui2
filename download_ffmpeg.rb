@@ -1,9 +1,19 @@
+# frozen_string_literal: true
 require "net/http"
 require "uri"
 require "fileutils"
 require "tmpdir"
 
-URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-03-19-13-03/ffmpeg-N-123557-g106616f13d-win64-lgpl-shared.zip"
+enable_gpl = ARGV.include?("--gpl")
+URL =
+  if enable_gpl
+    puts "!! ENABLING GPL BUILD !!"
+    puts "Do not distribute the resulting binary!"
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-03-19-13-03/ffmpeg-N-123557-g106616f13d-win64-gpl-shared.zip"
+  else
+    puts "Using LGPL build"
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-03-19-13-03/ffmpeg-N-123557-g106616f13d-win64-lgpl-shared.zip"
+  end
 DEST = File.join(__dir__, "ffmpeg")
 
 def download(url, dest_io)
@@ -33,9 +43,15 @@ def download(url, dest_io)
   end
 end
 
-if File.directory?(DEST)
-  puts "Already exists: #{DEST}"
-  exit
+if File.exist?("#{DEST}/LICENSE.txt")
+  is_gpl = File.read("#{DEST}/LICENSE.txt").include?("GNU GENERAL PUBLIC LICENSE")
+  if is_gpl == enable_gpl
+    puts "FFmpeg is already downloaded and matches the requested license."
+    exit 0
+  else
+    puts "FFmpeg is already downloaded but does not match the requested license. Re-downloading..."
+    FileUtils.rm_rf(DEST)
+  end
 end
 
 puts "Downloading FFmpeg..."
