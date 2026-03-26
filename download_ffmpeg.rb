@@ -3,7 +3,7 @@ require "uri"
 require "fileutils"
 require "tmpdir"
 
-URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-03-19-13-03/ffmpeg-N-123557-g106616f13d-win64-gpl-shared.zip"
+URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-03-19-13-03/ffmpeg-N-123557-g106616f13d-win64-lgpl-shared.zip"
 DEST = File.join(__dir__, "ffmpeg")
 
 def download(url, dest_io)
