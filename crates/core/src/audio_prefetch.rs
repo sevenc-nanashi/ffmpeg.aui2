@@ -117,11 +117,16 @@ fn read_audio_range(
         };
 
         if needs_seek {
-            let entry = request
+            // audio_index is pre-filtered to the matching stream and sorted by timestamp
+            // (= start_sample order), so binary search is valid.
+            let pos = request
                 .audio_index
-                .iter()
-                .rev()
-                .find(|e| e.stream_index == request.stream_index && e.start_sample as usize <= start_idx);
+                .partition_point(|e| e.start_sample as usize <= start_idx);
+            let entry = if pos > 0 {
+                Some(&request.audio_index[pos - 1])
+            } else {
+                None
+            };
 
             if let Some(entry) = entry {
                 tracing::debug!(
@@ -163,16 +168,9 @@ fn read_audio_range(
             let src_offset = (copy_start - buffer_start) * request.channels;
             let dst_offset = (copy_start - start_idx) * request.channels;
             let copy_len = (copy_end - copy_start) * request.channels;
-            for (i, sample) in state
-                .buffer
-                .samples
-                .iter()
-                .skip(src_offset)
-                .take(copy_len)
-                .enumerate()
-            {
-                samples[dst_offset + i] = *sample;
-            }
+            let contiguous = state.buffer.samples.make_contiguous();
+            samples[dst_offset..dst_offset + copy_len]
+                .copy_from_slice(&contiguous[src_offset..src_offset + copy_len]);
         }
     }
 

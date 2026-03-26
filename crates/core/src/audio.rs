@@ -89,11 +89,12 @@ impl AudioDecoderState {
                         && frame.channels() as usize == channels
                     {
                         let num_samples = frame.samples();
+                        let planes: Vec<&[f32]> =
+                            (0..channels).map(|c| frame.plane::<f32>(c)).collect();
+                        self.buffer.samples.reserve(num_samples * channels);
                         for sample_index in 0..num_samples {
-                            for channel in 0..channels {
-                                self.buffer
-                                    .samples
-                                    .push_back(frame.plane::<f32>(channel)[sample_index]);
+                            for plane in &planes {
+                                self.buffer.samples.push_back(plane[sample_index]);
                             }
                         }
                     } else if frame.format()
@@ -109,12 +110,11 @@ impl AudioDecoderState {
                         self.resampler.run(&frame, &mut resampled)?;
                         let data = resampled.data(0);
                         let num_samples = resampled.samples();
-                        let mut samples = vec![0f32; num_samples * channels];
-                        for i in 0..num_samples * channels {
-                            samples[i] =
-                                f32::from_le_bytes(data[i * 4..(i + 1) * 4].try_into().unwrap());
-                        }
-                        self.buffer.samples.extend(samples);
+                        self.buffer.samples.extend(
+                            data[..num_samples * channels * 4]
+                                .chunks_exact(4)
+                                .map(|b| f32::from_le_bytes(b.try_into().unwrap())),
+                        );
                     }
                 }
                 Err(e) => {

@@ -179,11 +179,11 @@ impl VideoDecoderState {
         Ok(())
     }
 
-    fn ensure_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
-        if self.filter_graph.is_some() {
-            return Ok(());
-        }
-
+    fn build_filter_graph(
+        &self,
+        frame: &ffmpeg_next::frame::Video,
+        filter_chain: &str,
+    ) -> anyhow::Result<ffmpeg_next::filter::Graph> {
         let args = format!(
             "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect=1/1",
             frame.width(),
@@ -204,10 +204,15 @@ impl VideoDecoderState {
             "out",
             "",
         )?;
-        graph.output("in", 0)?.input("out", 0)?.parse("vflip")?;
+        graph.output("in", 0)?.input("out", 0)?.parse(filter_chain)?;
         graph.validate()?;
+        Ok(graph)
+    }
 
-        self.filter_graph = Some(graph);
+    fn ensure_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
+        if self.filter_graph.is_none() {
+            self.filter_graph = Some(self.build_filter_graph(frame, "vflip")?);
+        }
         Ok(())
     }
 
@@ -237,37 +242,12 @@ impl VideoDecoderState {
     }
 
     fn ensure_hdr_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
-        if self.hdr_filter_graph.is_some() {
-            return Ok(());
+        if self.hdr_filter_graph.is_none() {
+            self.hdr_filter_graph = Some(self.build_filter_graph(
+                frame,
+                "zscale=transfer=linear:range=full:rangein=full,format=pix_fmts=gbrpf32le",
+            )?);
         }
-
-        let args = format!(
-            "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect=1/1",
-            frame.width(),
-            frame.height(),
-            ffmpeg_next::ffi::AVPixelFormat::from(frame.format()) as i32,
-            self.time_base.numerator(),
-            self.time_base.denominator(),
-        );
-
-        let mut graph = ffmpeg_next::filter::Graph::new();
-        graph.add(
-            &ffmpeg_next::filter::find("buffer").context("buffer filter not found")?,
-            "in",
-            &args,
-        )?;
-        graph.add(
-            &ffmpeg_next::filter::find("buffersink").context("buffersink filter not found")?,
-            "out",
-            "",
-        )?;
-        graph
-            .output("in", 0)?
-            .input("out", 0)?
-            .parse("zscale=transfer=linear:range=full:rangein=full,format=pix_fmts=gbrpf32le")?;
-        graph.validate()?;
-
-        self.hdr_filter_graph = Some(graph);
         Ok(())
     }
 
@@ -388,22 +368,18 @@ impl VideoDecoderState {
         let mut output = vec![0u8; h * w * 8];
 
         for y in 0..h {
-            for x in 0..w {
-                let r = f32::from_le_bytes(
-                    r_data[y * r_stride + x * 4..y * r_stride + x * 4 + 4]
-                        .try_into()
-                        .unwrap(),
-                );
-                let g = f32::from_le_bytes(
-                    g_data[y * g_stride + x * 4..y * g_stride + x * 4 + 4]
-                        .try_into()
-                        .unwrap(),
-                );
-                let b = f32::from_le_bytes(
-                    b_data[y * b_stride + x * 4..y * b_stride + x * 4 + 4]
-                        .try_into()
-                        .unwrap(),
-                );
+            let r_row = &r_data[y * r_stride..y * r_stride + w * 4];
+            let g_row = &g_data[y * g_stride..y * g_stride + w * 4];
+            let b_row = &b_data[y * b_stride..y * b_stride + w * 4];
+            for (x, ((r_bytes, g_bytes), b_bytes)) in r_row
+                .chunks_exact(4)
+                .zip(g_row.chunks_exact(4))
+                .zip(b_row.chunks_exact(4))
+                .enumerate()
+            {
+                let r = f32::from_le_bytes(r_bytes.try_into().unwrap());
+                let g = f32::from_le_bytes(g_bytes.try_into().unwrap());
+                let b = f32::from_le_bytes(b_bytes.try_into().unwrap());
                 let off = (y * w + x) * 8;
                 output[off..off + 2].copy_from_slice(&f16::from_f32(r).to_le_bytes());
                 output[off + 2..off + 4].copy_from_slice(&f16::from_f32(g).to_le_bytes());
