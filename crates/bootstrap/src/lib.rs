@@ -50,7 +50,7 @@ fn initialize_core_handle() {
         Err(e) => native_dialog::DialogBuilder::message()
             .set_title("ffmpeg.aui2")
             .set_text(format!(
-                "Failed to initialize core library: {e}\n\nPlease try reinstalling the plugin."
+                "Failed to initialize: {e:?}\n\nPlease try reinstalling the plugin."
             ))
             .set_level(native_dialog::MessageLevel::Error)
             .alert()

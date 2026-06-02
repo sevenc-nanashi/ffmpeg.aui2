@@ -130,10 +130,6 @@ async fn run_prefetch_task(
                 continue;
             }
 
-            let entry = entry.clone();
-            let output_format = cfg.output_format.clone();
-            let path = path.clone();
-
             let result = tokio::task::block_in_place(|| {
                 let decoder = &mut decoder.0;
 
@@ -156,7 +152,7 @@ async fn run_prefetch_task(
                 }
 
                 match state.decode_to(entry.timestamp) {
-                    Ok(frame) => match state.frame_to_bytes(&frame, &output_format) {
+                    Ok(frame) => match state.frame_to_bytes(&frame, &cfg.output_format) {
                         Ok(data) => Some((frame_idx, entry.timestamp, data)),
                         Err(e) => {
                             tracing::warn!("Prefetch: scale failed at frame {frame_idx}: {e}");

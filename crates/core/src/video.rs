@@ -16,6 +16,10 @@ pub struct VideoDecoderState {
     is_hw: bool,
     /// Cached (colorspace, range) to avoid redundant sws_setColorspaceDetails calls.
     cached_colorspace: Option<(i32, i32)>,
+    /// Reusable scaled frame — avoids re-allocating AVFrame buffers each call.
+    scaled_frame: ffmpeg_next::frame::Video,
+    /// Reusable filter output frame.
+    filter_output_frame: ffmpeg_next::frame::Video,
 }
 
 impl VideoDecoderState {
@@ -62,6 +66,8 @@ impl VideoDecoderState {
             current_ts: f64::NEG_INFINITY,
             is_hw,
             cached_colorspace: None,
+            scaled_frame: ffmpeg_next::frame::Video::empty(),
+            filter_output_frame: ffmpeg_next::frame::Video::empty(),
         })
     }
 
@@ -223,7 +229,7 @@ impl VideoDecoderState {
     fn apply_vflip(
         &mut self,
         frame: &ffmpeg_next::frame::Video,
-    ) -> anyhow::Result<ffmpeg_next::frame::Video> {
+    ) -> anyhow::Result<()> {
         self.ensure_filter(frame)?;
         let graph = self.filter_graph.as_mut().unwrap();
 
@@ -234,15 +240,14 @@ impl VideoDecoderState {
             .add(frame)
             .context("Failed to add frame to filter graph")?;
 
-        let mut output = ffmpeg_next::frame::Video::empty();
         graph
             .get("out")
             .unwrap()
             .sink()
-            .frame(&mut output)
+            .frame(&mut self.filter_output_frame)
             .context("Failed to get frame from filter graph")?;
 
-        Ok(output)
+        Ok(())
     }
 
     fn ensure_hdr_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
@@ -258,7 +263,7 @@ impl VideoDecoderState {
     fn apply_hdr_to_hf64(
         &mut self,
         frame: &ffmpeg_next::frame::Video,
-    ) -> anyhow::Result<ffmpeg_next::frame::Video> {
+    ) -> anyhow::Result<()> {
         self.ensure_hdr_filter(frame)?;
         let graph = self.hdr_filter_graph.as_mut().unwrap();
 
@@ -269,15 +274,14 @@ impl VideoDecoderState {
             .add(frame)
             .context("Failed to add HDR frame to filter graph")?;
 
-        let mut output = ffmpeg_next::frame::Video::empty();
         graph
             .get("out")
             .unwrap()
             .sink()
-            .frame(&mut output)
+            .frame(&mut self.filter_output_frame)
             .context("Failed to get HDR frame from filter graph")?;
 
-        Ok(output)
+        Ok(())
     }
 
     /// Decode frame → (optionally vflip via avfilter) → scale → return pixel bytes. Does NOT touch prefetch.
@@ -287,46 +291,49 @@ impl VideoDecoderState {
         output_format: &VideoOutputFormat,
     ) -> anyhow::Result<Vec<u8>> {
         if matches!(output_format, VideoOutputFormat::Hf64) && is_hdr_transfer(frame) {
-            let scaled = self.apply_hdr_to_hf64(frame)?;
-            return Self::hf64_frame_to_bytes(&scaled);
+            self.apply_hdr_to_hf64(frame)?;
+            return Self::hf64_frame_to_bytes(&self.filter_output_frame);
         }
 
         self.ensure_scaler(output_format, frame.format())?;
 
         let needs_vflip = matches!(output_format, VideoOutputFormat::Bgra);
-        let flipped;
         let frame_to_scale = if needs_vflip {
-            flipped = self.apply_vflip(frame)?;
-            &flipped
+            self.apply_vflip(frame)?;
+            &self.filter_output_frame as *const _
         } else {
-            frame
+            frame as *const _
         };
+        // SAFETY: filter_output_frame and frame both outlive this function,
+        // and apply_vflip's mutable borrow has ended.
+        let frame_to_scale = unsafe { &*frame_to_scale };
 
-        let scaler = self.scaler.as_mut().unwrap();
-        let is_rgb_output = matches!(
-            output_format,
-            VideoOutputFormat::Bgra | VideoOutputFormat::Hf64
-        );
-        if is_rgb_output {
-            let colorspace = swscale_colorspace(frame_to_scale);
-            let range = swscale_range(frame_to_scale.color_range());
-            if self.cached_colorspace != Some((colorspace, range)) {
-                Self::configure_rgb_scaler_colorspace(scaler, frame_to_scale)?;
-                self.cached_colorspace = Some((colorspace, range));
+        {
+            let scaler = self.scaler.as_mut().unwrap();
+            let is_rgb_output = matches!(
+                output_format,
+                VideoOutputFormat::Bgra | VideoOutputFormat::Hf64
+            );
+            if is_rgb_output {
+                let colorspace = swscale_colorspace(frame_to_scale);
+                let range = swscale_range(frame_to_scale.color_range());
+                if self.cached_colorspace != Some((colorspace, range)) {
+                    Self::configure_rgb_scaler_colorspace(scaler, frame_to_scale)?;
+                    self.cached_colorspace = Some((colorspace, range));
+                }
             }
+            scaler
+                .run(frame_to_scale, &mut self.scaled_frame)
+                .context("Failed to scale frame")?;
         }
-        let mut scaled = ffmpeg_next::frame::Video::empty();
-        scaler
-            .run(frame_to_scale, &mut scaled)
-            .context("Failed to scale frame")?;
 
-        let w = scaled.width() as usize;
-        let h = scaled.height() as usize;
+        let w = self.scaled_frame.width() as usize;
+        let h = self.scaled_frame.height() as usize;
 
         match output_format {
             VideoOutputFormat::Yuy2 => {
-                let data = scaled.data(0);
-                let stride = scaled.stride(0);
+                let data = self.scaled_frame.data(0);
+                let stride = self.scaled_frame.stride(0);
                 let bpr = w * 2;
                 let mut packed = vec![0u8; h * bpr];
                 if stride == bpr {
@@ -340,8 +347,8 @@ impl VideoDecoderState {
                 Ok(packed)
             }
             VideoOutputFormat::Bgra => {
-                let data = scaled.data(0);
-                let stride = scaled.stride(0);
+                let data = self.scaled_frame.data(0);
+                let stride = self.scaled_frame.stride(0);
                 let bpr = w * 4;
                 let mut output = vec![0u8; h * bpr];
                 if stride == bpr {
@@ -354,7 +361,7 @@ impl VideoDecoderState {
                 }
                 Ok(output)
             }
-            VideoOutputFormat::Hf64 => Self::hf64_frame_to_bytes(&scaled),
+            VideoOutputFormat::Hf64 => Self::hf64_frame_to_bytes(&self.scaled_frame),
         }
     }
 

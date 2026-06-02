@@ -73,7 +73,7 @@ fn audio_buffer_range(state: &AudioDecoderState, channels: usize) -> Option<(usi
     state
         .buffer
         .start_sample
-        .map(|start| (start, start + state.buffer.samples.len() / channels))
+        .map(|start| (start, start + (state.buffer.samples.len() - state.buffer.read_offset) / channels))
 }
 
 fn read_audio_range(
@@ -160,17 +160,16 @@ fn read_audio_range(
     let mut samples = vec![0.0f32; total_f32];
 
     if let Some(buffer_start) = state.buffer.start_sample {
-        let buffer_end = buffer_start + state.buffer.samples.len() / request.channels;
+        let buffer_end = buffer_start + (state.buffer.samples.len() - state.buffer.read_offset) / request.channels;
         let copy_start = start_idx.max(buffer_start);
         let copy_end = end_idx.min(buffer_end);
 
         if copy_start < copy_end {
-            let src_offset = (copy_start - buffer_start) * request.channels;
+            let src_offset = state.buffer.read_offset + (copy_start - buffer_start) * request.channels;
             let dst_offset = (copy_start - start_idx) * request.channels;
             let copy_len = (copy_end - copy_start) * request.channels;
-            let contiguous = state.buffer.samples.make_contiguous();
             samples[dst_offset..dst_offset + copy_len]
-                .copy_from_slice(&contiguous[src_offset..src_offset + copy_len]);
+                .copy_from_slice(&state.buffer.samples[src_offset..src_offset + copy_len]);
         }
     }
 

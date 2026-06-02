@@ -9,10 +9,10 @@ URL =
   if enable_gpl
     puts "!! ENABLING GPL BUILD !!"
     puts "Do not distribute the resulting binary!"
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-03-19-13-03/ffmpeg-N-123557-g106616f13d-win64-gpl-shared.zip"
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
   else
     puts "Using LGPL build"
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-03-19-13-03/ffmpeg-N-123557-g106616f13d-win64-lgpl-shared.zip"
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip"
   end
 DEST = File.join(__dir__, "ffmpeg")
 

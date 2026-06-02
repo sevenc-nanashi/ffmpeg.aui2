@@ -2,7 +2,9 @@
 pub struct BufferedAudio {
     // Interleaved sample buffer start position in audio frames, not raw f32 elements.
     pub start_sample: Option<usize>,
-    pub samples: std::collections::VecDeque<f32>,
+    pub samples: Vec<f32>,
+    // Index into `samples` where valid data begins (avoids O(n) front-removal).
+    pub read_offset: usize,
 }
 
 pub struct AudioDecoderState {
@@ -75,7 +77,7 @@ impl AudioDecoderState {
 
         // while self.buffer.start_sample + self.buffer.samples.len() / self.channels < end_sample {
         while self.buffer.start_sample.map_or(true, |start| {
-            start + self.buffer.samples.len() / channels < end_sample
+            start + (self.buffer.samples.len() - self.buffer.read_offset) / channels < end_sample
         }) {
             match self.decoder.receive_frame(&mut frame) {
                 Ok(_) => {
@@ -94,7 +96,7 @@ impl AudioDecoderState {
                         self.buffer.samples.reserve(num_samples * channels);
                         for sample_index in 0..num_samples {
                             for plane in &planes {
-                                self.buffer.samples.push_back(plane[sample_index]);
+                                self.buffer.samples.push(plane[sample_index]);
                             }
                         }
                     } else if frame.format()
@@ -141,11 +143,18 @@ impl AudioDecoderState {
     pub fn trim_before(&mut self, sample: usize) {
         if let Some(start) = self.buffer.start_sample {
             if sample > start {
-                let drain_frames =
-                    (sample - start).min(self.buffer.samples.len() / self.channels);
+                let valid_frames =
+                    (self.buffer.samples.len() - self.buffer.read_offset) / self.channels;
+                let drain_frames = (sample - start).min(valid_frames);
                 let drain_count = drain_frames * self.channels;
-                self.buffer.samples.drain(..drain_count);
+                self.buffer.read_offset += drain_count;
                 self.buffer.start_sample = Some(start + drain_frames);
+
+                // Compact when dead zone exceeds half the buffer.
+                if self.buffer.read_offset > self.buffer.samples.len() / 2 {
+                    self.buffer.samples.drain(..self.buffer.read_offset);
+                    self.buffer.read_offset = 0;
+                }
             }
         }
     }
@@ -166,6 +175,7 @@ impl AudioDecoderState {
         self.decoder.flush();
         self.buffer.start_sample = None;
         self.buffer.samples.clear();
+        self.buffer.read_offset = 0;
         self.decoder_eof_sent = false;
     }
 
