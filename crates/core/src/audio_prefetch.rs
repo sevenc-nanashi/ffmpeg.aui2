@@ -33,8 +33,7 @@ unsafe impl Send for SendDecoder {}
 impl AudioPrefetchHandle {
     pub fn new(path: std::path::PathBuf) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
-        let task = crate::runtime()
-            .spawn(run_audio_prefetch_task(rx, path));
+        let task = crate::runtime().spawn(run_audio_prefetch_task(rx, path));
         Self { tx, task }
     }
 
@@ -62,18 +61,19 @@ async fn run_audio_prefetch_task(
     let mut decoder = SendDecoder(None);
 
     while let Some((request, response_tx)) = rx.recv().await {
-        let result = tokio::task::block_in_place(|| {
-            read_audio_range(&path, &mut decoder.0, &request)
-        });
+        let result =
+            tokio::task::block_in_place(|| read_audio_range(&path, &mut decoder.0, &request));
         let _ = response_tx.send(result);
     }
 }
 
 fn audio_buffer_range(state: &AudioDecoderState, channels: usize) -> Option<(usize, usize)> {
-    state
-        .buffer
-        .start_sample
-        .map(|start| (start, start + (state.buffer.samples.len() - state.buffer.read_offset) / channels))
+    state.buffer.start_sample.map(|start| {
+        (
+            start,
+            start + (state.buffer.samples.len() - state.buffer.read_offset) / channels,
+        )
+    })
 }
 
 fn read_audio_range(
@@ -160,12 +160,14 @@ fn read_audio_range(
     let mut samples = vec![0.0f32; total_f32];
 
     if let Some(buffer_start) = state.buffer.start_sample {
-        let buffer_end = buffer_start + (state.buffer.samples.len() - state.buffer.read_offset) / request.channels;
+        let buffer_end = buffer_start
+            + (state.buffer.samples.len() - state.buffer.read_offset) / request.channels;
         let copy_start = start_idx.max(buffer_start);
         let copy_end = end_idx.min(buffer_end);
 
         if copy_start < copy_end {
-            let src_offset = state.buffer.read_offset + (copy_start - buffer_start) * request.channels;
+            let src_offset =
+                state.buffer.read_offset + (copy_start - buffer_start) * request.channels;
             let dst_offset = (copy_start - start_idx) * request.channels;
             let copy_len = (copy_end - copy_start) * request.channels;
             samples[dst_offset..dst_offset + copy_len]

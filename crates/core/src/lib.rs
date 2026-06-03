@@ -308,6 +308,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         video_track: u32,
         audio_track: u32,
     ) -> aviutl2::AnyResult<aviutl2::input::InputInfo> {
+        let mut video_prefetch_config_changed = false;
         let video = if let Some(v) = handle.index.video_tracks().nth(video_track as usize) {
             if v.duration <= 0.0 || v.frames == 0 {
                 tracing::warn!(
@@ -316,30 +317,42 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                     v.duration,
                     v.frames
                 );
-                handle.current_video_track = None;
+                if handle.current_video_track.take().is_some() {
+                    handle.video_index = std::sync::Arc::new(Vec::new());
+                    *handle.video_decoder.lock().unwrap() = None;
+                    video_prefetch_config_changed = true;
+                }
                 None
             } else {
-                let mut video_index: Vec<_> = handle
-                    .index
-                    .entries
-                    .iter()
-                    .filter(|e| e.stream_index() == v.stream_index)
-                    .filter_map(|e| e.as_video().cloned())
-                    .collect();
-                // Sort by PTS (display order) — packet order is DTS which differs for B-frames
-                video_index.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
-                handle.video_index = std::sync::Arc::new(video_index);
-
-                // Invalidate cached decoder if stream changed
-                let mut vd = handle.video_decoder.lock().unwrap();
-                if vd
+                let video_track_changed = handle
+                    .current_video_track
                     .as_ref()
-                    .is_some_and(|s| s.stream_index != v.stream_index)
-                {
-                    *vd = None;
-                }
+                    .is_none_or(|current| current.stream_index != v.stream_index);
 
-                handle.current_video_track = Some(v.clone());
+                if video_track_changed {
+                    let mut video_index: Vec<_> = handle
+                        .index
+                        .entries
+                        .iter()
+                        .filter(|e| e.stream_index() == v.stream_index)
+                        .filter_map(|e| e.as_video().cloned())
+                        .collect();
+                    // Sort by PTS (display order) — packet order is DTS which differs for B-frames
+                    video_index.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                    handle.video_index = std::sync::Arc::new(video_index);
+
+                    // Invalidate cached decoder if stream changed
+                    let mut vd = handle.video_decoder.lock().unwrap();
+                    if vd
+                        .as_ref()
+                        .is_some_and(|s| s.stream_index != v.stream_index)
+                    {
+                        *vd = None;
+                    }
+
+                    handle.current_video_track = Some(v.clone());
+                    video_prefetch_config_changed = true;
+                }
 
                 let cfg = config();
                 let fps_precision = 10i32.pow(cfg.fps_precision);
@@ -378,21 +391,27 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                 })
             }
         } else {
+            if handle.current_video_track.take().is_some() {
+                handle.video_index = std::sync::Arc::new(Vec::new());
+                *handle.video_decoder.lock().unwrap() = None;
+                video_prefetch_config_changed = true;
+            }
             None
         };
 
-        // Update prefetch config whenever video track changes
-        let video_index_arc = std::sync::Arc::clone(&handle.video_index);
-        let _ = handle
-            .prefetch
-            .config_tx
-            .send(handle.current_video_track.as_ref().map(|v| PrefetchConfig {
-                video_index: video_index_arc,
-                output_format: v.output_format.clone(),
-                width: v.width,
-                height: v.height,
-            }));
-        handle.prefetch.clear_cache();
+        if video_prefetch_config_changed {
+            let video_index_arc = std::sync::Arc::clone(&handle.video_index);
+            let _ = handle
+                .prefetch
+                .config_tx
+                .send(handle.current_video_track.as_ref().map(|v| PrefetchConfig {
+                    video_index: video_index_arc,
+                    output_format: v.output_format.clone(),
+                    width: v.width,
+                    height: v.height,
+                }));
+            handle.prefetch.clear_cache();
+        }
 
         let audio = if let Some(a) = handle.index.audio_tracks().nth(audio_track as usize) {
             if a.duration <= 0.0 || a.samples == 0 {
@@ -402,21 +421,29 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                     a.duration,
                     a.samples,
                 );
-                handle.current_audio_track = None;
+                if handle.current_audio_track.take().is_some() {
+                    handle.audio_index = std::sync::Arc::new(Vec::new());
+                }
                 None
             } else {
-                let mut audio_index: Vec<_> = handle
-                    .index
-                    .entries
-                    .iter()
-                    .filter(|e| e.stream_index() == a.stream_index)
-                    .filter_map(|e| e.as_audio().cloned())
-                    .collect();
-                audio_index.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
-                handle.audio_index = std::sync::Arc::new(audio_index);
+                let audio_track_changed = handle
+                    .current_audio_track
+                    .as_ref()
+                    .is_none_or(|current| current.stream_index != a.stream_index);
 
-                // Invalidate cached decoder if stream changed
-                handle.current_audio_track = Some(a.clone());
+                if audio_track_changed {
+                    let mut audio_index: Vec<_> = handle
+                        .index
+                        .entries
+                        .iter()
+                        .filter(|e| e.stream_index() == a.stream_index)
+                        .filter_map(|e| e.as_audio().cloned())
+                        .collect();
+                    audio_index.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                    handle.audio_index = std::sync::Arc::new(audio_index);
+
+                    handle.current_audio_track = Some(a.clone());
+                }
 
                 Some(aviutl2::input::AudioInputInfo {
                     sample_rate: a.sample_rate,
@@ -426,6 +453,9 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                 })
             }
         } else {
+            if handle.current_audio_track.take().is_some() {
+                handle.audio_index = std::sync::Arc::new(Vec::new());
+            }
             None
         };
         tracing::info!(
@@ -514,9 +544,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         }
 
         let video_frame = state.decode_to(target_ts)?;
-        let pixel_data = state.frame_to_bytes(&video_frame, output_format)?;
-        drop(state_guard);
-
+        let pixel_data = state.frame_to_bytes_buffered(&video_frame, output_format)?;
         returner.write(&pixel_data);
         Ok(())
     }

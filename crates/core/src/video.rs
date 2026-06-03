@@ -20,6 +20,8 @@ pub struct VideoDecoderState {
     scaled_frame: ffmpeg_next::frame::Video,
     /// Reusable filter output frame.
     filter_output_frame: ffmpeg_next::frame::Video,
+    /// Reusable output pixel buffer for synchronous reads.
+    output_buffer: Vec<u8>,
 }
 
 impl VideoDecoderState {
@@ -68,6 +70,7 @@ impl VideoDecoderState {
             cached_colorspace: None,
             scaled_frame: ffmpeg_next::frame::Video::empty(),
             filter_output_frame: ffmpeg_next::frame::Video::empty(),
+            output_buffer: Vec::new(),
         })
     }
 
@@ -214,7 +217,10 @@ impl VideoDecoderState {
             "out",
             "",
         )?;
-        graph.output("in", 0)?.input("out", 0)?.parse(filter_chain)?;
+        graph
+            .output("in", 0)?
+            .input("out", 0)?
+            .parse(filter_chain)?;
         graph.validate()?;
         Ok(graph)
     }
@@ -226,10 +232,7 @@ impl VideoDecoderState {
         Ok(())
     }
 
-    fn apply_vflip(
-        &mut self,
-        frame: &ffmpeg_next::frame::Video,
-    ) -> anyhow::Result<()> {
+    fn apply_vflip(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
         self.ensure_filter(frame)?;
         let graph = self.filter_graph.as_mut().unwrap();
 
@@ -260,10 +263,7 @@ impl VideoDecoderState {
         Ok(())
     }
 
-    fn apply_hdr_to_hf64(
-        &mut self,
-        frame: &ffmpeg_next::frame::Video,
-    ) -> anyhow::Result<()> {
+    fn apply_hdr_to_hf64(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
         self.ensure_hdr_filter(frame)?;
         let graph = self.hdr_filter_graph.as_mut().unwrap();
 
@@ -284,15 +284,39 @@ impl VideoDecoderState {
         Ok(())
     }
 
-    /// Decode frame → (optionally vflip via avfilter) → scale → return pixel bytes. Does NOT touch prefetch.
+    /// Decode frame -> convert into an internal reusable buffer. Does NOT touch prefetch.
+    pub fn frame_to_bytes_buffered(
+        &mut self,
+        frame: &ffmpeg_next::frame::Video,
+        output_format: &VideoOutputFormat,
+    ) -> anyhow::Result<&[u8]> {
+        let mut output = std::mem::take(&mut self.output_buffer);
+        self.frame_to_bytes_into(frame, output_format, &mut output)?;
+        self.output_buffer = output;
+        Ok(&self.output_buffer)
+    }
+
+    /// Decode frame -> (optionally vflip via avfilter) -> scale -> return owned pixel bytes.
+    /// This is used by prefetch because cached frames need owned storage.
     pub fn frame_to_bytes(
         &mut self,
         frame: &ffmpeg_next::frame::Video,
         output_format: &VideoOutputFormat,
     ) -> anyhow::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        self.frame_to_bytes_into(frame, output_format, &mut output)?;
+        Ok(output)
+    }
+
+    fn frame_to_bytes_into(
+        &mut self,
+        frame: &ffmpeg_next::frame::Video,
+        output_format: &VideoOutputFormat,
+        output: &mut Vec<u8>,
+    ) -> anyhow::Result<()> {
         if matches!(output_format, VideoOutputFormat::Hf64) && is_hdr_transfer(frame) {
             self.apply_hdr_to_hf64(frame)?;
-            return Self::hf64_frame_to_bytes(&self.filter_output_frame);
+            return Self::hf64_frame_to_bytes(&self.filter_output_frame, output);
         }
 
         self.ensure_scaler(output_format, frame.format())?;
@@ -332,40 +356,42 @@ impl VideoDecoderState {
 
         match output_format {
             VideoOutputFormat::Yuy2 => {
-                let data = self.scaled_frame.data(0);
-                let stride = self.scaled_frame.stride(0);
-                let bpr = w * 2;
-                let mut packed = vec![0u8; h * bpr];
-                if stride == bpr {
-                    packed.copy_from_slice(&data[..h * bpr]);
-                } else {
-                    packed.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
-                        let src = y * stride;
-                        dst.copy_from_slice(&data[src..src + bpr]);
-                    });
-                }
-                Ok(packed)
+                Self::packed_frame_to_bytes(&self.scaled_frame, w, h, 2, output);
+                Ok(())
             }
             VideoOutputFormat::Bgra => {
-                let data = self.scaled_frame.data(0);
-                let stride = self.scaled_frame.stride(0);
-                let bpr = w * 4;
-                let mut output = vec![0u8; h * bpr];
-                if stride == bpr {
-                    output.copy_from_slice(&data[..h * bpr]);
-                } else {
-                    output.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
-                        let src = y * stride;
-                        dst.copy_from_slice(&data[src..src + bpr]);
-                    });
-                }
-                Ok(output)
+                Self::packed_frame_to_bytes(&self.scaled_frame, w, h, 4, output);
+                Ok(())
             }
-            VideoOutputFormat::Hf64 => Self::hf64_frame_to_bytes(&self.scaled_frame),
+            VideoOutputFormat::Hf64 => Self::hf64_frame_to_bytes(&self.scaled_frame, output),
         }
     }
 
-    fn hf64_frame_to_bytes(scaled: &ffmpeg_next::frame::Video) -> anyhow::Result<Vec<u8>> {
+    fn packed_frame_to_bytes(
+        scaled: &ffmpeg_next::frame::Video,
+        w: usize,
+        h: usize,
+        bytes_per_pixel: usize,
+        output: &mut Vec<u8>,
+    ) {
+        let data = scaled.data(0);
+        let stride = scaled.stride(0);
+        let bpr = w * bytes_per_pixel;
+        output.resize(h * bpr, 0);
+        if stride == bpr {
+            output.copy_from_slice(&data[..h * bpr]);
+        } else {
+            output.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
+                let src = y * stride;
+                dst.copy_from_slice(&data[src..src + bpr]);
+            });
+        }
+    }
+
+    fn hf64_frame_to_bytes(
+        scaled: &ffmpeg_next::frame::Video,
+        output: &mut Vec<u8>,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             scaled.format() == ffmpeg_next::format::Pixel::GBRPF32LE,
             "Unexpected pixel format for Hf64 conversion: {:?}",
@@ -381,30 +407,33 @@ impl VideoDecoderState {
         let b_stride = scaled.stride(1);
         let r_stride = scaled.stride(2);
         let alpha_bytes = f16::from_f32(1.0).to_le_bytes();
-        let mut output = vec![0u8; h * w * 8];
+        output.resize(h * w * 8, 0);
 
-        output.par_chunks_mut(w * 8).enumerate().for_each(|(y, row)| {
-            let r_row = &r_data[y * r_stride..y * r_stride + w * 4];
-            let g_row = &g_data[y * g_stride..y * g_stride + w * 4];
-            let b_row = &b_data[y * b_stride..y * b_stride + w * 4];
-            for (x, ((r_bytes, g_bytes), b_bytes)) in r_row
-                .chunks_exact(4)
-                .zip(g_row.chunks_exact(4))
-                .zip(b_row.chunks_exact(4))
-                .enumerate()
-            {
-                let r = f32::from_le_bytes(r_bytes.try_into().unwrap());
-                let g = f32::from_le_bytes(g_bytes.try_into().unwrap());
-                let b = f32::from_le_bytes(b_bytes.try_into().unwrap());
-                let off = x * 8;
-                row[off..off + 2].copy_from_slice(&f16::from_f32(r).to_le_bytes());
-                row[off + 2..off + 4].copy_from_slice(&f16::from_f32(g).to_le_bytes());
-                row[off + 4..off + 6].copy_from_slice(&f16::from_f32(b).to_le_bytes());
-                row[off + 6..off + 8].copy_from_slice(&alpha_bytes);
-            }
-        });
+        output
+            .par_chunks_mut(w * 8)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let r_row = &r_data[y * r_stride..y * r_stride + w * 4];
+                let g_row = &g_data[y * g_stride..y * g_stride + w * 4];
+                let b_row = &b_data[y * b_stride..y * b_stride + w * 4];
+                for (x, ((r_bytes, g_bytes), b_bytes)) in r_row
+                    .chunks_exact(4)
+                    .zip(g_row.chunks_exact(4))
+                    .zip(b_row.chunks_exact(4))
+                    .enumerate()
+                {
+                    let r = f32::from_le_bytes(r_bytes.try_into().unwrap());
+                    let g = f32::from_le_bytes(g_bytes.try_into().unwrap());
+                    let b = f32::from_le_bytes(b_bytes.try_into().unwrap());
+                    let off = x * 8;
+                    row[off..off + 2].copy_from_slice(&f16::from_f32(r).to_le_bytes());
+                    row[off + 2..off + 4].copy_from_slice(&f16::from_f32(g).to_le_bytes());
+                    row[off + 4..off + 6].copy_from_slice(&f16::from_f32(b).to_le_bytes());
+                    row[off + 6..off + 8].copy_from_slice(&alpha_bytes);
+                }
+            });
 
-        Ok(output)
+        Ok(())
     }
 }
 
@@ -460,7 +489,11 @@ fn try_setup_hwaccel(
             )
         };
         if ret < 0 {
-            tracing::warn!("Failed to create HW device context for {:?}: {}", hw_type, ret);
+            tracing::warn!(
+                "Failed to create HW device context for {:?}: {}",
+                hw_type,
+                ret
+            );
             continue;
         }
         unsafe {
@@ -482,7 +515,11 @@ fn download_hw_frame(
     let ret = unsafe {
         ffmpeg_next::ffi::av_hwframe_transfer_data(sw_frame.as_mut_ptr(), hw_frame.as_ptr(), 0)
     };
-    anyhow::ensure!(ret >= 0, "Failed to transfer HW frame to SW memory: {}", ret);
+    anyhow::ensure!(
+        ret >= 0,
+        "Failed to transfer HW frame to SW memory: {}",
+        ret
+    );
     unsafe {
         (*sw_frame.as_mut_ptr()).pts = (*hw_frame.as_ptr()).pts;
     }
