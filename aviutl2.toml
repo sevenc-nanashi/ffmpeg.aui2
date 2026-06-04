@@ -27,11 +27,12 @@ download_ffmpeg = "ruby download_ffmpeg.rb"
 
 [development]
 aviutl2_version = "latest"
-catalog_dependencies = ["Mr-Ojii.L-SMASH-Works"]
+catalog_dependencies = ["Mr-Ojii.L-SMASH-Works", "rigaya.x264guiEx"]
 
 [preview]
 catalog_dependencies = [
   "Mr-Ojii.L-SMASH-Works",
+  "rigaya.x264guiEx",
   "sevenc-nanashi.aviutl2-rs.rusty_statistics"
 ]
 
