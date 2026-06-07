@@ -33,7 +33,8 @@ catalog_dependencies = ["Mr-Ojii.L-SMASH-Works", "rigaya.x264guiEx"]
 catalog_dependencies = [
   "Mr-Ojii.L-SMASH-Works",
   "rigaya.x264guiEx",
-  "sevenc-nanashi.aviutl2-rs.rusty_statistics"
+  "sevenc-nanashi.aviutl2-rs.rusty_statistics",
+  "VRAMWIZ.VW_Media_Input"
 ]
 
 [artifacts.fix_hdr]

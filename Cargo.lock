@@ -31,9 +31,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "aviutl2"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e6f4dfa452e57acef54f7bafd709994c63378c0572a7122b405e94f178c4893"
+checksum = "cbb868f2495c3b96328d1383d2a870c3f804c8e8e4b95c897dec5b57a80780b6"
 dependencies = [
  "anyhow",
  "aviutl2-alias",
@@ -59,9 +59,9 @@ dependencies = [
 
 [[package]]
 name = "aviutl2-alias"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f8a01df97b8d37fed21b21462ee6c5568aacbebc189c4300a53a2001a50c7e8"
+checksum = "beb6427c2c06927b5c9791c409c5ffb943c479d1932d2eca3b7de028e077972b"
 dependencies = [
  "duplicate",
  "indexmap",
@@ -70,9 +70,9 @@ dependencies = [
 
 [[package]]
 name = "aviutl2-macros"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63dc318eec3e9e408b444d325f46297778f6d666c53cb8cd02a20a6759fc0c57"
+checksum = "b3f8c1d5a88ce626277bd52d76e5bb3579badba53cd33612eef289c7bc513de1"
 dependencies = [
  "decimal-rs",
  "either",
@@ -85,9 +85,9 @@ dependencies = [
 
 [[package]]
 name = "aviutl2-sys"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fae25228342f6bba4b2c41b30555ddce4f774d78a9861e3fadd518013000a96"
+checksum = "a01b0c63f209ef029a9c1a9f3daeb704cbe4dd345609e0b505edc1d1bcd421cd"
 dependencies = [
  "windows-sys",
 ]
@@ -112,9 +112,9 @@ dependencies = [
 
 [[package]]
 name = "bitflags"
-version = "2.11.1"
+version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "block2"
@@ -561,9 +561,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.30"
+version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
+checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "matchers"
