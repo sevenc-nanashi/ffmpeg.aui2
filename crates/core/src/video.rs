@@ -298,8 +298,8 @@ impl VideoDecoderState {
         &mut self,
         frame: &ffmpeg_next::frame::Video,
         output_format: &VideoOutputFormat,
+        mut output: Vec<u8>,
     ) -> anyhow::Result<Vec<u8>> {
-        let mut output = Vec::new();
         self.frame_to_bytes_into(frame, output_format, &mut output)?;
         Ok(output)
     }

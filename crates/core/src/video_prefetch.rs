@@ -13,6 +13,7 @@ pub struct PrefetchHandle {
     pub cache: std::sync::Arc<dashmap::DashMap<usize, Vec<u8>>>,
     pub config_tx: tokio::sync::watch::Sender<Option<PrefetchConfig>>,
     pub position_tx: tokio::sync::watch::Sender<usize>,
+    reusable_buffer: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -33,21 +34,40 @@ impl PrefetchHandle {
         let total: usize = self.cache.iter().map(|e| e.value().len()).sum();
         crate::PREFETCH_TOTAL_BYTES.fetch_sub(total, std::sync::atomic::Ordering::Relaxed);
         self.cache.clear();
+        *self.reusable_buffer.lock().unwrap() = None;
+    }
+
+    pub fn recycle_buffer(&self, buffer: Vec<u8>) {
+        let mut reusable_buffer = self.reusable_buffer.lock().unwrap();
+        if reusable_buffer
+            .as_ref()
+            .is_none_or(|existing| existing.capacity() < buffer.capacity())
+        {
+            *reusable_buffer = Some(buffer);
+        }
     }
 
     pub fn new(path: std::path::PathBuf) -> Self {
         let cache = std::sync::Arc::new(dashmap::DashMap::new());
+        let reusable_buffer = std::sync::Arc::new(std::sync::Mutex::new(None));
         let (config_tx, config_rx) = tokio::sync::watch::channel(None::<PrefetchConfig>);
         let (position_tx, position_rx) = tokio::sync::watch::channel(0usize);
 
         let cache_clone = std::sync::Arc::clone(&cache);
-        let task =
-            crate::runtime().spawn(run_prefetch_task(config_rx, position_rx, cache_clone, path));
+        let reusable_buffer_clone = std::sync::Arc::clone(&reusable_buffer);
+        let task = crate::runtime().spawn(run_prefetch_task(
+            config_rx,
+            position_rx,
+            cache_clone,
+            reusable_buffer_clone,
+            path,
+        ));
 
         Self {
             cache,
             config_tx,
             position_tx,
+            reusable_buffer,
             task,
         }
     }
@@ -57,6 +77,7 @@ async fn run_prefetch_task(
     mut config_rx: tokio::sync::watch::Receiver<Option<PrefetchConfig>>,
     mut position_rx: tokio::sync::watch::Receiver<usize>,
     cache: std::sync::Arc<dashmap::DashMap<usize, Vec<u8>>>,
+    reusable_buffer: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     path: std::path::PathBuf,
 ) {
     let mut decoder = SendDecoder(None);
@@ -125,6 +146,9 @@ async fn run_prefetch_task(
             if frame_idx > end_frame {
                 break;
             }
+            if frame_idx <= current {
+                continue;
+            }
 
             if cache.contains_key(&frame_idx) {
                 continue;
@@ -152,13 +176,20 @@ async fn run_prefetch_task(
                 }
 
                 match state.decode_to(entry.timestamp) {
-                    Ok(frame) => match state.frame_to_bytes(&frame, &cfg.output_format) {
-                        Ok(data) => Some((frame_idx, entry.timestamp, data)),
-                        Err(e) => {
-                            tracing::warn!("Prefetch: scale failed at frame {frame_idx}: {e}");
-                            None
+                    Ok(frame) => {
+                        let output = reusable_buffer.lock().unwrap().take();
+                        let output = match output {
+                            Some(output) => output,
+                            None => Vec::new(),
+                        };
+                        match state.frame_to_bytes(&frame, &cfg.output_format, output) {
+                            Ok(data) => Some((frame_idx, entry.timestamp, data)),
+                            Err(e) => {
+                                tracing::warn!("Prefetch: scale failed at frame {frame_idx}: {e}");
+                                None
+                            }
                         }
-                    },
+                    }
                     Err(e) => {
                         tracing::warn!("Prefetch: decode failed at frame {frame_idx}: {e}");
                         None

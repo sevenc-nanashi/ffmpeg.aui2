@@ -530,6 +530,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
                 }
             });
             returner.write(&data);
+            handle.prefetch.recycle_buffer(data);
             return Ok(());
         }
 
