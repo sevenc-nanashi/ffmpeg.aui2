@@ -5,3 +5,6 @@
 /release
 
 ffmpeg
+# Local benchmark data and results
+/crates/benchmark/videos/
+/crates/benchmark/results/
