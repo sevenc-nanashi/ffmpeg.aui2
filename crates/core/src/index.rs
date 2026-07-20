@@ -251,9 +251,19 @@ pub fn create_index(
                         // YUVっぽいフォーマットはYUV422に変換して扱うようにする（そのほうが速い）
                         let is_yuv = matches!(
                             video.format(),
-                            ffmpeg_next::format::Pixel::YUV422P
+                            ffmpeg_next::format::Pixel::YUV410P
+                            | ffmpeg_next::format::Pixel::YUV411P
+                            | ffmpeg_next::format::Pixel::YUV422P
                             | ffmpeg_next::format::Pixel::YUYV422
                             | ffmpeg_next::format::Pixel::UYVY422
+                            | ffmpeg_next::format::Pixel::YVYU422
+                            | ffmpeg_next::format::Pixel::UYYVYY411
+                            | ffmpeg_next::format::Pixel::NV12
+                            | ffmpeg_next::format::Pixel::NV21
+                            | ffmpeg_next::format::Pixel::NV16
+                            | ffmpeg_next::format::Pixel::GRAY8
+                            | ffmpeg_next::format::Pixel::MonoWhite
+                            | ffmpeg_next::format::Pixel::MonoBlack
                             | ffmpeg_next::format::Pixel::YUV422P10
                             | ffmpeg_next::format::Pixel::YUV422P12
                             | ffmpeg_next::format::Pixel::YUV422P16

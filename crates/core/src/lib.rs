@@ -497,8 +497,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         let entry = handle
             .video_index
             .get(frame)
-            .ok_or_else(|| anyhow::anyhow!("Frame {} out of range", frame))?
-            .clone();
+            .ok_or_else(|| anyhow::anyhow!("Frame {} out of range", frame))?;
 
         let video_track = handle
             .current_video_track
@@ -510,7 +509,14 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         let target_ts = entry.timestamp;
 
         // Update current position and wake prefetch thread
-        let _ = handle.prefetch.position_tx.send(frame);
+        handle.prefetch.position_tx.send_if_modified(|position| {
+            if *position == frame {
+                false
+            } else {
+                *position = frame;
+                true
+            }
+        });
 
         // Check prefetch cache
         if let Some((_, data)) = handle.prefetch.cache.remove(&frame) {
@@ -537,14 +543,17 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
         }
         let state = state_guard.as_mut().unwrap();
 
-        if target_ts < state.current_ts - 1e-6
-            || entry.last_keyframe_timestamp > state.current_ts + 1e-6
-        {
+        if let Some(pixel_data) = state.cached_frame_bytes(frame) {
+            returner.write(&pixel_data);
+            return Ok(());
+        }
+
+        if state.should_seek_to(frame, target_ts, entry.last_keyframe_timestamp) {
             state.seek(entry.last_keyframe_timestamp);
         }
 
         let video_frame = state.decode_to(target_ts)?;
-        let pixel_data = state.frame_to_bytes_buffered(&video_frame, output_format)?;
+        let pixel_data = state.frame_to_bytes_buffered(&video_frame, output_format, frame)?;
         returner.write(&pixel_data);
         Ok(())
     }

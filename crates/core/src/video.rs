@@ -4,11 +4,12 @@ use anyhow::Context;
 use aviutl2::f16;
 use rayon::prelude::*;
 
+const FORWARD_SEEK_THRESHOLD: usize = 10;
+
 pub struct VideoDecoderState {
     pub input: ffmpeg_next::format::context::Input,
     pub decoder: ffmpeg_next::decoder::Video,
     pub scaler: Option<ffmpeg_next::software::scaling::Context>,
-    pub filter_graph: Option<ffmpeg_next::filter::Graph>,
     pub hdr_filter_graph: Option<ffmpeg_next::filter::Graph>,
     pub stream_index: usize,
     pub time_base: ffmpeg_next::Rational,
@@ -22,6 +23,8 @@ pub struct VideoDecoderState {
     filter_output_frame: ffmpeg_next::frame::Video,
     /// Reusable output pixel buffer for synchronous reads.
     output_buffer: Vec<u8>,
+    /// Frame index currently stored in output_buffer.
+    output_frame_index: Option<usize>,
 }
 
 impl VideoDecoderState {
@@ -61,7 +64,6 @@ impl VideoDecoderState {
             input,
             decoder,
             scaler: None,
-            filter_graph: None,
             hdr_filter_graph: None,
             stream_index,
             time_base,
@@ -71,6 +73,7 @@ impl VideoDecoderState {
             scaled_frame: ffmpeg_next::frame::Video::empty(),
             filter_output_frame: ffmpeg_next::frame::Video::empty(),
             output_buffer: Vec::new(),
+            output_frame_index: None,
         })
     }
 
@@ -154,7 +157,7 @@ impl VideoDecoderState {
                     dst_fmt,
                     width,
                     height,
-                    ffmpeg_next::software::scaling::Flags::BILINEAR,
+                    ffmpeg_next::software::scaling::Flags::FAST_BILINEAR,
                 )
                 .context("Failed to create scaler")?,
             );
@@ -225,34 +228,6 @@ impl VideoDecoderState {
         Ok(graph)
     }
 
-    fn ensure_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
-        if self.filter_graph.is_none() {
-            self.filter_graph = Some(self.build_filter_graph(frame, "vflip")?);
-        }
-        Ok(())
-    }
-
-    fn apply_vflip(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
-        self.ensure_filter(frame)?;
-        let graph = self.filter_graph.as_mut().unwrap();
-
-        graph
-            .get("in")
-            .unwrap()
-            .source()
-            .add(frame)
-            .context("Failed to add frame to filter graph")?;
-
-        graph
-            .get("out")
-            .unwrap()
-            .sink()
-            .frame(&mut self.filter_output_frame)
-            .context("Failed to get frame from filter graph")?;
-
-        Ok(())
-    }
-
     fn ensure_hdr_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
         if self.hdr_filter_graph.is_none() {
             self.hdr_filter_graph = Some(self.build_filter_graph(
@@ -289,14 +264,35 @@ impl VideoDecoderState {
         &mut self,
         frame: &ffmpeg_next::frame::Video,
         output_format: &VideoOutputFormat,
+        frame_index: usize,
     ) -> anyhow::Result<&[u8]> {
         let mut output = std::mem::take(&mut self.output_buffer);
         self.frame_to_bytes_into(frame, output_format, &mut output)?;
         self.output_buffer = output;
+        self.output_frame_index = Some(frame_index);
         Ok(&self.output_buffer)
     }
 
-    /// Decode frame -> (optionally vflip via avfilter) -> scale -> return owned pixel bytes.
+    pub fn cached_frame_bytes(&self, frame_index: usize) -> Option<&[u8]> {
+        (self.output_frame_index == Some(frame_index)).then_some(&self.output_buffer)
+    }
+
+    pub fn should_seek_to(
+        &self,
+        target_frame_index: usize,
+        target_ts: f64,
+        target_keyframe_ts: f64,
+    ) -> bool {
+        should_seek_video(
+            self.output_frame_index,
+            self.current_ts,
+            target_frame_index,
+            target_ts,
+            target_keyframe_ts,
+        )
+    }
+
+    /// Decode frame -> scale -> return owned pixel bytes.
     /// This is used by prefetch because cached frames need owned storage.
     pub fn frame_to_bytes(
         &mut self,
@@ -321,17 +317,6 @@ impl VideoDecoderState {
 
         self.ensure_scaler(output_format, frame.format())?;
 
-        let needs_vflip = matches!(output_format, VideoOutputFormat::Bgra);
-        let frame_to_scale = if needs_vflip {
-            self.apply_vflip(frame)?;
-            &self.filter_output_frame as *const _
-        } else {
-            frame as *const _
-        };
-        // SAFETY: filter_output_frame and frame both outlive this function,
-        // and apply_vflip's mutable borrow has ended.
-        let frame_to_scale = unsafe { &*frame_to_scale };
-
         {
             let scaler = self.scaler.as_mut().unwrap();
             let is_rgb_output = matches!(
@@ -339,53 +324,82 @@ impl VideoDecoderState {
                 VideoOutputFormat::Bgra | VideoOutputFormat::Hf64
             );
             if is_rgb_output {
-                let colorspace = swscale_colorspace(frame_to_scale);
-                let range = swscale_range(frame_to_scale.color_range());
+                let colorspace = swscale_colorspace(frame);
+                let range = swscale_range(frame.color_range());
                 if self.cached_colorspace != Some((colorspace, range)) {
-                    Self::configure_rgb_scaler_colorspace(scaler, frame_to_scale)?;
+                    Self::configure_rgb_scaler_colorspace(scaler, frame)?;
                     self.cached_colorspace = Some((colorspace, range));
                 }
             }
-            scaler
-                .run(frame_to_scale, &mut self.scaled_frame)
-                .context("Failed to scale frame")?;
         }
 
-        let w = self.scaled_frame.width() as usize;
-        let h = self.scaled_frame.height() as usize;
-
         match output_format {
-            VideoOutputFormat::Yuy2 => {
-                Self::packed_frame_to_bytes(&self.scaled_frame, w, h, 2, output);
-                Ok(())
+            VideoOutputFormat::Yuy2 => Self::scale_packed_frame_to_bytes(
+                self.scaler.as_mut().unwrap(),
+                frame,
+                2,
+                false,
+                output,
+            ),
+            VideoOutputFormat::Bgra => Self::scale_packed_frame_to_bytes(
+                self.scaler.as_mut().unwrap(),
+                frame,
+                4,
+                true,
+                output,
+            ),
+            VideoOutputFormat::Hf64 => {
+                self.scaler
+                    .as_mut()
+                    .unwrap()
+                    .run(frame, &mut self.scaled_frame)
+                    .context("Failed to scale frame")?;
+                Self::hf64_frame_to_bytes(&self.scaled_frame, output)
             }
-            VideoOutputFormat::Bgra => {
-                Self::packed_frame_to_bytes(&self.scaled_frame, w, h, 4, output);
-                Ok(())
-            }
-            VideoOutputFormat::Hf64 => Self::hf64_frame_to_bytes(&self.scaled_frame, output),
         }
     }
 
-    fn packed_frame_to_bytes(
-        scaled: &ffmpeg_next::frame::Video,
-        w: usize,
-        h: usize,
+    fn scale_packed_frame_to_bytes(
+        scaler: &mut ffmpeg_next::software::scaling::Context,
+        frame: &ffmpeg_next::frame::Video,
         bytes_per_pixel: usize,
+        vertically_flip: bool,
         output: &mut Vec<u8>,
-    ) {
-        let data = scaled.data(0);
-        let stride = scaled.stride(0);
-        let bpr = w * bytes_per_pixel;
-        output.resize(h * bpr, 0);
-        if stride == bpr {
-            output.copy_from_slice(&data[..h * bpr]);
+    ) -> anyhow::Result<()> {
+        let width = frame.width() as usize;
+        let height = frame.height() as usize;
+        anyhow::ensure!(width > 0 && height > 0, "Invalid video frame dimensions");
+
+        let bpr = width * bytes_per_pixel;
+        let stride = i32::try_from(bpr).context("Video frame stride is too large")?;
+        output.resize(height * bpr, 0);
+
+        let mut destination_data = [std::ptr::null_mut(); 8];
+        let mut destination_linesize = [0i32; 8];
+        if vertically_flip {
+            destination_data[0] = unsafe { output.as_mut_ptr().add((height - 1) * bpr) };
+            destination_linesize[0] = -stride;
         } else {
-            output.chunks_mut(bpr).enumerate().for_each(|(y, dst)| {
-                let src = y * stride;
-                dst.copy_from_slice(&data[src..src + bpr]);
-            });
+            destination_data[0] = output.as_mut_ptr();
+            destination_linesize[0] = stride;
         }
+
+        let scaled_height = unsafe {
+            ffmpeg_next::ffi::sws_scale(
+                scaler.as_mut_ptr(),
+                (*frame.as_ptr()).data.as_ptr() as *const *const _,
+                (*frame.as_ptr()).linesize.as_ptr(),
+                0,
+                height as i32,
+                destination_data.as_ptr(),
+                destination_linesize.as_mut_ptr(),
+            )
+        };
+        anyhow::ensure!(
+            scaled_height == height as i32,
+            "Failed to scale complete video frame: {scaled_height}/{height} rows"
+        );
+        Ok(())
     }
 
     fn hf64_frame_to_bytes(
@@ -454,6 +468,28 @@ fn codec_supports_hwaccel(
             i += 1;
         }
     }
+}
+
+fn should_seek_video(
+    current_frame_index: Option<usize>,
+    current_ts: f64,
+    target_frame_index: usize,
+    target_ts: f64,
+    target_keyframe_ts: f64,
+) -> bool {
+    if target_ts < current_ts - 1e-6 {
+        return true;
+    }
+
+    let Some(current_frame_index) = current_frame_index else {
+        return true;
+    };
+    if target_frame_index <= current_frame_index {
+        return target_frame_index < current_frame_index;
+    }
+
+    let forward_distance = target_frame_index - current_frame_index;
+    forward_distance > FORWARD_SEEK_THRESHOLD && target_keyframe_ts > current_ts + 1e-6
 }
 
 fn try_setup_hwaccel(
@@ -561,4 +597,54 @@ fn is_hdr_transfer(frame: &ffmpeg_next::frame::Video) -> bool {
         ffmpeg_next::color::TransferCharacteristic::SMPTE2084
             | ffmpeg_next::color::TransferCharacteristic::ARIB_STD_B67
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seek_decision_matches_lwlibav_forward_threshold() {
+        assert!(should_seek_video(None, f64::NEG_INFINITY, 0, 0.0, 0.0));
+        assert!(!should_seek_video(Some(20), 2.0, 20, 2.0, 2.0));
+        assert!(should_seek_video(Some(20), 2.0, 19, 2.0, 1.0));
+        assert!(!should_seek_video(Some(20), 2.0, 30, 3.0, 2.5));
+        assert!(!should_seek_video(Some(20), 2.0, 31, 3.1, 1.0));
+        assert!(should_seek_video(Some(20), 2.0, 31, 3.1, 2.5));
+    }
+
+    #[test]
+    fn packed_scaling_flips_bgra_into_destination_buffer() {
+        ffmpeg_next::init().unwrap();
+
+        let width = 4;
+        let height = 2;
+        let bytes_per_row = width as usize * 4;
+        let mut frame =
+            ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::BGRA, width, height);
+        let stride = frame.stride(0);
+
+        let top_row = vec![0x11; bytes_per_row];
+        let bottom_row = vec![0x22; bytes_per_row];
+        frame.data_mut(0)[..bytes_per_row].copy_from_slice(&top_row);
+        frame.data_mut(0)[stride..stride + bytes_per_row].copy_from_slice(&bottom_row);
+
+        let mut scaler = ffmpeg_next::software::scaling::Context::get(
+            ffmpeg_next::format::Pixel::BGRA,
+            width,
+            height,
+            ffmpeg_next::format::Pixel::BGRA,
+            width,
+            height,
+            ffmpeg_next::software::scaling::Flags::BILINEAR,
+        )
+        .unwrap();
+        let mut output = Vec::new();
+
+        VideoDecoderState::scale_packed_frame_to_bytes(&mut scaler, &frame, 4, true, &mut output)
+            .unwrap();
+
+        assert_eq!(&output[..bytes_per_row], bottom_row);
+        assert_eq!(&output[bytes_per_row..], top_row);
+    }
 }
