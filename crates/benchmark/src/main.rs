@@ -53,9 +53,14 @@ fn main() -> anyhow::Result<()> {
 
     let videos_dir = args.manifest_dir();
     let videos = manifest::resolve_videos(&args.videos, &videos_dir)?;
-    println!("videos={} dll={}", videos.len(), args.dll.display());
 
     let plugin = plugin::LoadedPlugin::load(&args.dll, &videos_dir)?;
+    println!(
+        "plugin={} videos={} dll={}",
+        plugin.name(),
+        videos.len(),
+        args.dll.display()
+    );
     let preparation_time = benchmark::prepare_inputs(&plugin, &videos)?;
     println!(
         "preparation={:.3}s (excluded from frame timings)",
@@ -76,7 +81,8 @@ fn main() -> anyhow::Result<()> {
     for mode in modes {
         for &direction in &directions {
             println!(
-                "running mode={} direction={} warmup={} frames={}",
+                "running plugin={} mode={} direction={} warmup={} frames={}",
+                plugin.name(),
                 mode.as_str(),
                 direction.as_str(),
                 args.warmup,
@@ -92,7 +98,7 @@ fn main() -> anyhow::Result<()> {
                 args.thread_priority,
             )?;
             let summary = benchmark::summarize(&samples)?;
-            benchmark::print_summary(&summary);
+            benchmark::print_summary(plugin.name(), &summary);
             all_samples.extend(samples);
         }
     }

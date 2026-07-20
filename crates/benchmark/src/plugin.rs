@@ -27,6 +27,7 @@ const HOST_VERSION: u32 = 2_010_100;
 
 pub struct LoadedPlugin {
     table: NonNull<INPUT_PLUGIN_TABLE>,
+    name: String,
     uninitialize: Option<UninitializePlugin>,
     _host: HostEnvironment,
     _library: Library,
@@ -89,9 +90,11 @@ impl LoadedPlugin {
             }
             anyhow::bail!("GetInputPluginTable returned null");
         };
+        let name = decode_wide_string(unsafe { table.as_ref().name }, "plugin name")?;
 
         Ok(Self {
             table,
+            name,
             uninitialize,
             _host: host,
             _library: library,
@@ -100,6 +103,10 @@ impl LoadedPlugin {
 
     fn table(&self) -> &INPUT_PLUGIN_TABLE {
         unsafe { self.table.as_ref() }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn is_concurrent(&self) -> bool {
@@ -320,6 +327,19 @@ fn wide_path(path: &Path) -> Vec<u16> {
         .collect()
 }
 
+fn decode_wide_string(pointer: *const u16, field: &str) -> anyhow::Result<String> {
+    const MAX_WIDE_STRING_LEN: usize = 32 * 1024;
+
+    anyhow::ensure!(!pointer.is_null(), "{field} pointer is null");
+    let length = (0..MAX_WIDE_STRING_LEN)
+        .find(|&index| unsafe { *pointer.add(index) == 0 })
+        .with_context(|| format!("{field} is not null-terminated"))?;
+    let value = String::from_utf16(unsafe { std::slice::from_raw_parts(pointer, length) })
+        .with_context(|| format!("{field} is not valid UTF-16"))?;
+    anyhow::ensure!(!value.is_empty(), "{field} is empty");
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +357,21 @@ mod tests {
         biClrUsed: 0,
         biClrImportant: 0,
     };
+
+    #[test]
+    fn plugin_name_is_decoded_from_utf16() {
+        let name = [0x5165, 0x529b, 0x30d7, 0x30e9, 0x30b0, 0x30a4, 0x30f3, 0];
+
+        assert_eq!(
+            decode_wide_string(name.as_ptr(), "plugin name").unwrap(),
+            "入力プラグイン"
+        );
+    }
+
+    #[test]
+    fn null_plugin_name_is_rejected() {
+        assert!(decode_wide_string(std::ptr::null(), "plugin name").is_err());
+    }
 
     extern "C" fn close(_handle: INPUT_HANDLE) -> bool {
         true

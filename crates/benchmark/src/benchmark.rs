@@ -432,9 +432,10 @@ pub fn summarize(samples: &[FrameSample]) -> anyhow::Result<Summary> {
     })
 }
 
-pub fn print_summary(summary: &Summary) {
+pub fn print_summary(plugin_name: &str, summary: &Summary) {
     println!(
-        "mode={} direction={} frames={} inputs={} total={:.3}s fps={:.3} avg={:.3}ms median={:.3}ms p95={:.3}ms min={:.3}ms max={:.3}ms working_set_avg={:.1}MiB working_set_max={:.1}MiB private_avg={:.1}MiB private_max={:.1}MiB",
+        "plugin={} mode={} direction={} frames={} inputs={} total={:.3}s fps={:.3} avg={:.3}ms median={:.3}ms p95={:.3}ms min={:.3}ms max={:.3}ms working_set_avg={:.1}MiB working_set_max={:.1}MiB private_avg={:.1}MiB private_max={:.1}MiB",
+        plugin_name,
         summary.mode.as_str(),
         summary.direction.as_str(),
         summary.frames,
