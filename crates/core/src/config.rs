@@ -42,9 +42,9 @@ impl Default for Config {
             log_level: tracing::Level::INFO,
             json_index: false,
             hwaccel: HwAccel::None,
-            prefetch_buffer_mb: 32,
+            prefetch_buffer_mb: 64,
             prefetch_total_buffer_mb: 512,
-            prefetch_frames: 10,
+            prefetch_frames: 16,
             fps_precision: 3,
             fps_mode: FpsMode::Real,
             rough_cache: false,
@@ -167,17 +167,17 @@ impl Config {
                         config.rough_cache =
                             matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
                     }
-                    ("prefetch", "prefetch_buffer_mb") => {
+                    ("general", "prefetch_buffer_mb") => {
                         if let Ok(v) = value.parse::<u32>() {
                             config.prefetch_buffer_mb = v;
                         }
                     }
-                    ("prefetch", "prefetch_total_buffer_mb") => {
+                    ("general", "prefetch_total_buffer_mb") => {
                         if let Ok(v) = value.parse::<u32>() {
                             config.prefetch_total_buffer_mb = v;
                         }
                     }
-                    ("prefetch", "prefetch_frames") => {
+                    ("general", "prefetch_frames") => {
                         if let Ok(v) = value.parse::<u32>() {
                             config.prefetch_frames = v;
                         }

@@ -196,6 +196,14 @@ impl InputHandle {
             bytes,
         })
     }
+
+    pub fn frame_digest(&self) -> u64 {
+        self.buffer
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    }
 }
 
 impl Drop for InputHandle {

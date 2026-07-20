@@ -44,6 +44,8 @@ fn main() -> anyhow::Result<()> {
         preparation_time.as_secs_f64()
     );
 
+    benchmark::verify_frames(&plugin, &videos, &args.verify_frames)?;
+
     let modes = modes_for_plugin(args.mode, plugin.is_concurrent())?;
     if args.mode == ExecutionMode::Both && !plugin.is_concurrent() {
         eprintln!(

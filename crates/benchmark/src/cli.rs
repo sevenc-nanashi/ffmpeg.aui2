@@ -39,6 +39,10 @@ pub struct Args {
     /// Video path. Repeat this option to override manifest.csv.
     #[arg(long = "video")]
     pub videos: Vec<PathBuf>,
+
+    /// Read and hash a frame before benchmarking. Repeat to verify an access sequence.
+    #[arg(long = "verify-frame")]
+    pub verify_frames: Vec<u32>,
 }
 
 impl Args {
@@ -99,6 +103,7 @@ mod tests {
             output: None,
             videos_dir: None,
             videos: Vec::new(),
+            verify_frames: Vec::new(),
         };
 
         assert_eq!(

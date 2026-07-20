@@ -86,9 +86,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4276677f61e97adcfc13927d6e8a214c8c1de30b011296939ee21cf74c3f26ef"
 dependencies = [
  "anyhow",
- "aviutl2-alias",
- "aviutl2-macros",
- "aviutl2-sys",
+ "aviutl2-alias 0.40.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "aviutl2-macros 0.40.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "aviutl2-sys 0.40.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "comptime-if",
+ "dashmap",
+ "duplicate",
+ "env_filter",
+ "half",
+ "num-rational",
+ "parking_lot",
+ "pastey",
+ "process_path",
+ "raw-window-handle",
+ "thiserror",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "windows",
+ "zerocopy",
+]
+
+[[package]]
+name = "aviutl2"
+version = "0.40.0"
+source = "git+https://github.com/sevenc-nanashi/aviutl2-rs#5b687246af2b2185627fad4e5b87eab607355037"
+dependencies = [
+ "anyhow",
+ "aviutl2-alias 0.40.0 (git+https://github.com/sevenc-nanashi/aviutl2-rs)",
+ "aviutl2-macros 0.40.0 (git+https://github.com/sevenc-nanashi/aviutl2-rs)",
+ "aviutl2-sys 0.40.0 (git+https://github.com/sevenc-nanashi/aviutl2-rs)",
  "comptime-if",
  "dashmap",
  "duplicate",
@@ -119,6 +146,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aviutl2-alias"
+version = "0.40.0"
+source = "git+https://github.com/sevenc-nanashi/aviutl2-rs#5b687246af2b2185627fad4e5b87eab607355037"
+dependencies = [
+ "duplicate",
+ "indexmap",
+ "thiserror",
+]
+
+[[package]]
 name = "aviutl2-macros"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -134,10 +171,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "aviutl2-macros"
+version = "0.40.0"
+source = "git+https://github.com/sevenc-nanashi/aviutl2-rs#5b687246af2b2185627fad4e5b87eab607355037"
+dependencies = [
+ "decimal-rs",
+ "either",
+ "itertools 0.15.0",
+ "proc-macro2",
+ "quote",
+ "strum",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "aviutl2-sys"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55b867c615b8518ba87d09ca5087f331b88c085eeca7e48427e70a799d9a4c74"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
+name = "aviutl2-sys"
+version = "0.40.0"
+source = "git+https://github.com/sevenc-nanashi/aviutl2-rs#5b687246af2b2185627fad4e5b87eab607355037"
 dependencies = [
  "windows-sys",
 ]
@@ -444,7 +503,7 @@ name = "ffmpeg-aui2"
 version = "0.1.4"
 dependencies = [
  "anyhow",
- "aviutl2",
+ "aviutl2 0.40.0 (git+https://github.com/sevenc-nanashi/aviutl2-rs)",
  "dashmap",
  "ffmpeg-next",
  "gxhash",
@@ -465,7 +524,7 @@ name = "ffmpeg-aui2-benchmark"
 version = "0.1.4"
 dependencies = [
  "anyhow",
- "aviutl2-sys",
+ "aviutl2-sys 0.40.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap",
  "csv",
  "libloading 0.9.0",
@@ -477,8 +536,8 @@ name = "ffmpeg-aui2-bootstrapper"
 version = "0.1.4"
 dependencies = [
  "anyhow",
- "aviutl2",
- "aviutl2-sys",
+ "aviutl2 0.40.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "aviutl2-sys 0.40.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "libloading 0.9.0",
  "native-dialog",
  "process_path",

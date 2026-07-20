@@ -77,6 +77,29 @@ pub fn prepare_inputs(plugin: &LoadedPlugin, videos: &[VideoSource]) -> anyhow::
     Ok(started.elapsed())
 }
 
+pub fn verify_frames(
+    plugin: &LoadedPlugin,
+    videos: &[VideoSource],
+    frames: &[u32],
+) -> anyhow::Result<()> {
+    if frames.is_empty() {
+        return Ok(());
+    }
+
+    let mut handles = open_inputs(plugin, videos)?;
+    for &frame in frames {
+        let frame = i32::try_from(frame).context("verification frame exceeds i32")?;
+        for (input_index, handle) in handles.iter_mut().enumerate() {
+            handle.read_frame(frame)?;
+            println!(
+                "verify input={input_index} frame={frame} digest={:016x}",
+                handle.frame_digest()
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn run(
     plugin: &LoadedPlugin,
     videos: &[VideoSource],

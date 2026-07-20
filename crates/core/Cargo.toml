@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = "1.0.104"
-aviutl2 = "0.40.0"
+aviutl2 = { git = "https://github.com/sevenc-nanashi/aviutl2-rs" }
 dashmap = "6.2.1"
 ffmpeg-next = { version = "8.1.0" }
 gxhash = "3.5.0"

@@ -33,5 +33,6 @@ cargo run --release -p ffmpeg-aui2-benchmark -- .\target\release\ffmpeg_aui2.dll
 - `--output <CSV>`
 - `--videos-dir <DIR>`
 - `--video <FILE>`（複数指定するとmanifestを使わない）
+- `--verify-frame <FRAME>`（複数指定すると指定順に読み込み、計測外で出力ダイジェストを表示する）
 
 CSVは1回の入力読み込みにつき1行で、`mode,frame,input_index,file,duration_ns,bytes,frame_wall_ns`を記録します。実効FPSは8入力すべての読み込みが完了するまでの`frame_wall_ns`から算出します。DLLロード、入力オープン、インデックス生成はフレーム計測に含めません。

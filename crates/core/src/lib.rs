@@ -8,8 +8,10 @@ use std::hash::Hasher;
 
 use anyhow::Context;
 use audio_prefetch::{AudioPrefetchHandle, AudioPrefetchRequest};
-use video::VideoDecoderState;
-use video_prefetch::{PrefetchConfig, PrefetchHandle};
+use video::{VideoDecoderState, Yuy2Converter};
+use video_prefetch::{PrefetchConfig, PrefetchHandle, PrefetchedFrame};
+
+const SEQUENTIAL_PREFETCH_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
 
 pub(crate) static CONFIG: std::sync::OnceLock<config::Config> = std::sync::OnceLock::new();
 /// Total bytes currently held in all video prefetch caches.
@@ -46,6 +48,7 @@ struct FfmpegAui2InputHandle {
     current_video_track: Option<index::VideoTrackInfo>,
     current_audio_track: Option<index::AudioTrackInfo>,
     video_decoder: std::sync::Mutex<Option<VideoDecoderState>>,
+    yuy2_converter: std::sync::Mutex<Yuy2Converter>,
     audio_prefetch: AudioPrefetchHandle,
     prefetch: PrefetchHandle,
 }
@@ -294,6 +297,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             current_video_track: None,
             current_audio_track: None,
             video_decoder: std::sync::Mutex::new(None),
+            yuy2_converter: std::sync::Mutex::new(Yuy2Converter::new()),
         })
     }
 
@@ -505,32 +509,53 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             .ok_or_else(|| anyhow::anyhow!("Video track info not set"))?;
 
         let output_format = &video_track.output_format;
+        let yuy2_output_len = (video_track.width as usize)
+            .checked_mul(video_track.height as usize)
+            .and_then(|pixels| pixels.checked_mul(2))
+            .context("Video output size overflow")?;
         let stream_index = entry.stream_index;
         let target_ts = entry.timestamp;
 
         // Update current position and wake prefetch thread
+        let previous_frame = *handle.prefetch.position_tx.borrow();
         handle.prefetch.position_tx.send_if_modified(|position| {
-            if *position == frame {
+            if *position == Some(frame) {
                 false
             } else {
-                *position = frame;
+                *position = Some(frame);
                 true
             }
         });
 
-        // Check prefetch cache
-        if let Some((_, data)) = handle.prefetch.cache.remove(&frame) {
-            PREFETCH_TOTAL_BYTES.fetch_sub(data.len(), std::sync::atomic::Ordering::Relaxed);
-            handle.prefetch.cache.retain(|&k, v| {
-                if k <= frame {
-                    PREFETCH_TOTAL_BYTES.fetch_sub(v.len(), std::sync::atomic::Ordering::Relaxed);
-                    false
-                } else {
-                    true
+        // Check prefetch cache. For sequential reads, briefly wait for an in-flight decode
+        // instead of starting a duplicate synchronous decoder immediately.
+        let is_sequential =
+            previous_frame.and_then(|previous| previous.checked_add(1)) == Some(frame);
+        let is_random_access = previous_frame.is_some() && !is_sequential;
+        let cached = if !is_random_access {
+            handle
+                .prefetch
+                .take_frame_or_wait(frame, SEQUENTIAL_PREFETCH_WAIT)
+        } else {
+            handle.prefetch.take_frame(frame)
+        };
+        if let Some(cached) = cached {
+            if is_random_access {
+                handle.prefetch.cache.retain(|&k, _| k > frame);
+            }
+            match cached {
+                PrefetchedFrame::Yuy2(cached_frame, _reservation) => {
+                    let mut converter = handle.yuy2_converter.lock().unwrap();
+                    returner.write_with(yuy2_output_len, |output| {
+                        converter.convert(&cached_frame.0, output)
+                    })?;
+                    handle.prefetch.remember_frame(frame, cached_frame);
                 }
-            });
-            returner.write(&data);
-            handle.prefetch.recycle_buffer(data);
+                PrefetchedFrame::Bytes(data, _reservation) => {
+                    returner.write(&data);
+                    handle.prefetch.recycle_buffer(data);
+                }
+            }
             return Ok(());
         }
 
@@ -548,14 +573,28 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             returner.write(&pixel_data);
             return Ok(());
         }
+        if matches!(output_format, index::VideoOutputFormat::Yuy2)
+            && let Some(video_frame) = state.cached_decoded_frame(frame)
+        {
+            returner.write_with(yuy2_output_len, |output| {
+                state.frame_to_yuy2_direct(&video_frame, frame, output)
+            })?;
+            return Ok(());
+        }
 
         if state.should_seek_to(frame, target_ts, entry.last_keyframe_timestamp) {
             state.seek(entry.last_keyframe_timestamp);
         }
 
         let video_frame = state.decode_to(target_ts)?;
-        let pixel_data = state.frame_to_bytes_buffered(&video_frame, output_format, frame)?;
-        returner.write(&pixel_data);
+        if matches!(output_format, index::VideoOutputFormat::Yuy2) {
+            returner.write_with(yuy2_output_len, |output| {
+                state.frame_to_yuy2_direct(&video_frame, frame, output)
+            })?;
+        } else {
+            let pixel_data = state.frame_to_bytes_buffered(&video_frame, output_format, frame)?;
+            returner.write(&pixel_data);
+        }
         Ok(())
     }
 

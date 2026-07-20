@@ -76,7 +76,7 @@ impl AudioDecoderState {
         let mut resampled = ffmpeg_next::frame::Audio::empty();
 
         // while self.buffer.start_sample + self.buffer.samples.len() / self.channels < end_sample {
-        while self.buffer.start_sample.map_or(true, |start| {
+        while self.buffer.start_sample.is_none_or(|start| {
             start + (self.buffer.samples.len() - self.buffer.read_offset) / channels < end_sample
         }) {
             match self.decoder.receive_frame(&mut frame) {
@@ -141,20 +141,20 @@ impl AudioDecoderState {
     }
 
     pub fn trim_before(&mut self, sample: usize) {
-        if let Some(start) = self.buffer.start_sample {
-            if sample > start {
-                let valid_frames =
-                    (self.buffer.samples.len() - self.buffer.read_offset) / self.channels;
-                let drain_frames = (sample - start).min(valid_frames);
-                let drain_count = drain_frames * self.channels;
-                self.buffer.read_offset += drain_count;
-                self.buffer.start_sample = Some(start + drain_frames);
+        if let Some(start) = self.buffer.start_sample
+            && sample > start
+        {
+            let valid_frames =
+                (self.buffer.samples.len() - self.buffer.read_offset) / self.channels;
+            let drain_frames = (sample - start).min(valid_frames);
+            let drain_count = drain_frames * self.channels;
+            self.buffer.read_offset += drain_count;
+            self.buffer.start_sample = Some(start + drain_frames);
 
-                // Compact when dead zone exceeds half the buffer.
-                if self.buffer.read_offset > self.buffer.samples.len() / 2 {
-                    self.buffer.samples.drain(..self.buffer.read_offset);
-                    self.buffer.read_offset = 0;
-                }
+            // Compact when dead zone exceeds half the buffer.
+            if self.buffer.read_offset > self.buffer.samples.len() / 2 {
+                self.buffer.samples.drain(..self.buffer.read_offset);
+                self.buffer.read_offset = 0;
             }
         }
     }

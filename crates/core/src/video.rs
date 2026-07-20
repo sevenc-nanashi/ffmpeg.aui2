@@ -6,6 +6,50 @@ use rayon::prelude::*;
 
 const FORWARD_SEEK_THRESHOLD: usize = 10;
 
+pub struct Yuy2Converter {
+    scaler: Option<ffmpeg_next::software::scaling::Context>,
+    source: Option<(ffmpeg_next::format::Pixel, u32, u32)>,
+}
+
+impl Yuy2Converter {
+    pub fn new() -> Self {
+        Self {
+            scaler: None,
+            source: None,
+        }
+    }
+
+    pub fn convert(
+        &mut self,
+        frame: &ffmpeg_next::frame::Video,
+        output: &mut [u8],
+    ) -> anyhow::Result<()> {
+        let source = (frame.format(), frame.width(), frame.height());
+        if self.source != Some(source) {
+            self.scaler = Some(
+                ffmpeg_next::software::scaling::Context::get(
+                    frame.format(),
+                    frame.width(),
+                    frame.height(),
+                    ffmpeg_next::format::Pixel::YUYV422,
+                    frame.width(),
+                    frame.height(),
+                    ffmpeg_next::software::scaling::Flags::FAST_BILINEAR,
+                )
+                .context("Failed to create YUY2 converter")?,
+            );
+            self.source = Some(source);
+        }
+        VideoDecoderState::scale_packed_frame_to_slice(
+            self.scaler.as_mut().unwrap(),
+            frame,
+            2,
+            false,
+            output,
+        )
+    }
+}
+
 pub struct VideoDecoderState {
     pub input: ffmpeg_next::format::context::Input,
     pub decoder: ffmpeg_next::decoder::Video,
@@ -25,6 +69,8 @@ pub struct VideoDecoderState {
     output_buffer: Vec<u8>,
     /// Frame index currently stored in output_buffer.
     output_frame_index: Option<usize>,
+    /// Decoded frame retained for repeated direct reads.
+    decoded_frame_cache: Option<(usize, ffmpeg_next::frame::Video)>,
 }
 
 impl VideoDecoderState {
@@ -74,6 +120,7 @@ impl VideoDecoderState {
             filter_output_frame: ffmpeg_next::frame::Video::empty(),
             output_buffer: Vec::new(),
             output_frame_index: None,
+            decoded_frame_cache: None,
         })
     }
 
@@ -91,6 +138,8 @@ impl VideoDecoderState {
         }
         self.decoder.flush();
         self.current_ts = f64::NEG_INFINITY;
+        self.output_frame_index = None;
+        self.decoded_frame_cache = None;
     }
 
     pub fn decode_to(&mut self, target_ts: f64) -> anyhow::Result<ffmpeg_next::frame::Video> {
@@ -274,7 +323,15 @@ impl VideoDecoderState {
     }
 
     pub fn cached_frame_bytes(&self, frame_index: usize) -> Option<&[u8]> {
-        (self.output_frame_index == Some(frame_index)).then_some(&self.output_buffer)
+        (self.output_frame_index == Some(frame_index) && !self.output_buffer.is_empty())
+            .then_some(&self.output_buffer)
+    }
+
+    pub fn cached_decoded_frame(&self, frame_index: usize) -> Option<ffmpeg_next::frame::Video> {
+        self.decoded_frame_cache
+            .as_ref()
+            .filter(|(cached_index, _)| *cached_index == frame_index)
+            .map(|(_, frame)| frame.clone())
     }
 
     pub fn should_seek_to(
@@ -302,6 +359,20 @@ impl VideoDecoderState {
     ) -> anyhow::Result<Vec<u8>> {
         self.frame_to_bytes_into(frame, output_format, &mut output)?;
         Ok(output)
+    }
+
+    pub fn frame_to_yuy2_direct(
+        &mut self,
+        frame: &ffmpeg_next::frame::Video,
+        frame_index: usize,
+        output: &mut [u8],
+    ) -> anyhow::Result<()> {
+        self.ensure_scaler(&VideoOutputFormat::Yuy2, frame.format())?;
+        Self::scale_packed_frame_to_slice(self.scaler.as_mut().unwrap(), frame, 2, false, output)?;
+        self.output_buffer.clear();
+        self.output_frame_index = Some(frame_index);
+        self.decoded_frame_cache = Some((frame_index, frame.clone()));
+        Ok(())
     }
 
     fn frame_to_bytes_into(
@@ -369,11 +440,28 @@ impl VideoDecoderState {
         let width = frame.width() as usize;
         let height = frame.height() as usize;
         anyhow::ensure!(width > 0 && height > 0, "Invalid video frame dimensions");
+        output.resize(width * height * bytes_per_pixel, 0);
+        Self::scale_packed_frame_to_slice(scaler, frame, bytes_per_pixel, vertically_flip, output)
+    }
 
+    fn scale_packed_frame_to_slice(
+        scaler: &mut ffmpeg_next::software::scaling::Context,
+        frame: &ffmpeg_next::frame::Video,
+        bytes_per_pixel: usize,
+        vertically_flip: bool,
+        output: &mut [u8],
+    ) -> anyhow::Result<()> {
+        let width = frame.width() as usize;
+        let height = frame.height() as usize;
+        anyhow::ensure!(width > 0 && height > 0, "Invalid video frame dimensions");
         let bpr = width * bytes_per_pixel;
+        let expected_len = height * bpr;
+        anyhow::ensure!(
+            output.len() == expected_len,
+            "Invalid video output buffer size: {}/{expected_len}",
+            output.len()
+        );
         let stride = i32::try_from(bpr).context("Video frame stride is too large")?;
-        output.resize(height * bpr, 0);
-
         let mut destination_data = [std::ptr::null_mut(); 8];
         let mut destination_linesize = [0i32; 8];
         if vertically_flip {
@@ -383,7 +471,6 @@ impl VideoDecoderState {
             destination_data[0] = output.as_mut_ptr();
             destination_linesize[0] = stride;
         }
-
         let scaled_height = unsafe {
             ffmpeg_next::ffi::sws_scale(
                 scaler.as_mut_ptr(),
@@ -401,7 +488,6 @@ impl VideoDecoderState {
         );
         Ok(())
     }
-
     fn hf64_frame_to_bytes(
         scaled: &ffmpeg_next::frame::Video,
         output: &mut Vec<u8>,
