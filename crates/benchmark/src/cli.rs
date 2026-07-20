@@ -3,10 +3,19 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 
+use crate::priority::{ProcessPriority, ThreadPriority};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ExecutionMode {
     Sequential,
     Parallel,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FrameDirection {
+    Forward,
+    Reverse,
     Both,
 }
 
@@ -20,11 +29,23 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = ExecutionMode::Both)]
     pub mode: ExecutionMode,
 
-    /// Sequential frames executed before measurement.
+    /// Frame access direction.
+    #[arg(long, value_enum, default_value_t = FrameDirection::Forward)]
+    pub direction: FrameDirection,
+
+    /// Windows process priority class.
+    #[arg(long, value_enum, default_value_t = ProcessPriority::High)]
+    pub process_priority: ProcessPriority,
+
+    /// Priority for benchmark threads that call the input plugin.
+    #[arg(long, value_enum, default_value_t = ThreadPriority::Highest)]
+    pub thread_priority: ThreadPriority,
+
+    /// Frame reads executed before measurement.
     #[arg(long, default_value_t = 30)]
     pub warmup: u32,
 
-    /// Number of sequential frames to measure.
+    /// Number of frame reads to measure.
     #[arg(long, default_value_t = 300)]
     pub frames: u32,
 
@@ -94,10 +115,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn priority_defaults_are_high_and_highest() {
+        let args = Args::try_parse_from(["benchmark", "plugin.dll"]).unwrap();
+
+        assert_eq!(args.process_priority, ProcessPriority::High);
+        assert_eq!(args.thread_priority, ThreadPriority::Highest);
+    }
+
+    #[test]
     fn default_manifest_dir_is_inside_the_crate() {
         let args = Args {
             dll: PathBuf::from("plugin.dll"),
             mode: ExecutionMode::Both,
+            direction: FrameDirection::Both,
+            process_priority: ProcessPriority::High,
+            thread_priority: ThreadPriority::Highest,
             warmup: 30,
             frames: 300,
             output: None,

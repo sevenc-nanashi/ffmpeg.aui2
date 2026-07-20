@@ -34,6 +34,9 @@ pub struct Config {
     pub fps_mode: FpsMode,
     /// If true, hash only file size + mtime + first/last 256 KB instead of the full file.
     pub rough_cache: bool,
+
+    /// Advertise Concurrent Mode (it makes performance worse somehow so default is false).
+    pub advertise_concurrent: bool,
 }
 
 impl Default for Config {
@@ -48,6 +51,7 @@ impl Default for Config {
             fps_precision: 3,
             fps_mode: FpsMode::Real,
             rough_cache: false,
+            advertise_concurrent: false,
         }
     }
 }
@@ -181,6 +185,10 @@ impl Config {
                         if let Ok(v) = value.parse::<u32>() {
                             config.prefetch_frames = v;
                         }
+                    }
+                    ("general", "advertise_concurrent") => {
+                        config.advertise_concurrent =
+                            matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
                     }
                     _ => {}
                 }

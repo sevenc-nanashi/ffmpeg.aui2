@@ -173,7 +173,7 @@ impl aviutl2::input::InputPlugin for FfmpegAui2 {
             name: "ffmpeg.aui2".into(),
             information: "FFMpeg-based input plugin for AviUtl2".into(),
             input_type: aviutl2::input::InputType::Both,
-            concurrent: true,
+            concurrent: crate::config().advertise_parallel,
             file_filters: aviutl2::file_filters! {
                 "Video Files" => ["mp4", "mkv", "avi", "mov", "flv"],
                 "Audio Files" => ["mp3", "aac", "flac", "wav", "ogg"],

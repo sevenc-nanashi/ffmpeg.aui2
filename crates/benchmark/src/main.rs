@@ -2,11 +2,13 @@ mod benchmark;
 mod cli;
 mod host;
 mod manifest;
+mod memory;
 mod plugin;
+mod priority;
 
 use clap::Parser;
 
-use benchmark::BenchmarkMode;
+use benchmark::{BenchmarkMode, FrameDirection};
 use cli::{Args, ExecutionMode};
 
 fn modes_for_plugin(
@@ -29,9 +31,25 @@ fn modes_for_plugin(
     }
 }
 
+fn directions(direction: cli::FrameDirection) -> Vec<FrameDirection> {
+    match direction {
+        cli::FrameDirection::Forward => vec![FrameDirection::Forward],
+        cli::FrameDirection::Reverse => vec![FrameDirection::Reverse],
+        cli::FrameDirection::Both => vec![FrameDirection::Forward, FrameDirection::Reverse],
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     args.validate()?;
+
+    priority::set_process_priority(args.process_priority)?;
+    priority::set_current_thread_priority(args.thread_priority)?;
+    println!(
+        "priority process={} thread={}",
+        args.process_priority.as_str(),
+        args.thread_priority.as_str()
+    );
 
     let videos_dir = args.manifest_dir();
     let videos = manifest::resolve_videos(&args.videos, &videos_dir)?;
@@ -47,24 +65,36 @@ fn main() -> anyhow::Result<()> {
     benchmark::verify_frames(&plugin, &videos, &args.verify_frames)?;
 
     let modes = modes_for_plugin(args.mode, plugin.is_concurrent())?;
+    let directions = directions(args.direction);
     if args.mode == ExecutionMode::Both && !plugin.is_concurrent() {
         eprintln!(
             "skipping parallel mode: plugin does not advertise INPUT_PLUGIN_TABLE::FLAG_CONCURRENT"
         );
     }
 
-    let mut all_samples = Vec::with_capacity(args.frames as usize * modes.len());
+    let mut all_samples = Vec::with_capacity(args.frames as usize * modes.len() * directions.len());
     for mode in modes {
-        println!(
-            "running mode={} warmup={} frames={}",
-            mode.as_str(),
-            args.warmup,
-            args.frames
-        );
-        let samples = benchmark::run(&plugin, &videos, args.warmup, args.frames, mode)?;
-        let summary = benchmark::summarize(&samples)?;
-        benchmark::print_summary(&summary);
-        all_samples.extend(samples);
+        for &direction in &directions {
+            println!(
+                "running mode={} direction={} warmup={} frames={}",
+                mode.as_str(),
+                direction.as_str(),
+                args.warmup,
+                args.frames
+            );
+            let samples = benchmark::run(
+                &plugin,
+                &videos,
+                args.warmup,
+                args.frames,
+                mode,
+                direction,
+                args.thread_priority,
+            )?;
+            let summary = benchmark::summarize(&samples)?;
+            benchmark::print_summary(&summary);
+            all_samples.extend(samples);
+        }
     }
 
     let output = args.output_path()?;

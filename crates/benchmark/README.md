@@ -16,7 +16,7 @@ uvx --from huggingface_hub huggingface-cli download sevenc-nanashi/ffmpeg.aui2_b
 cargo run --release -p ffmpeg-aui2-benchmark -- <INPUT_PLUGIN_DLL>
 ```
 
-既定では30フレームのウォームアップ後、300フレームを8入力の逐次・並列モードで計測します。`FLAG_CONCURRENT`非対応プラグインでは並列モードをスキップします。動画は`videos/manifest.csv`から読み込み、結果は`results/<DLL名>.csv`へ出力します。
+既定では30フレームのウォームアップ後、300フレームを8入力の逐次・並列モード、順方向・逆方向で計測します。逆方向では対象範囲の末尾から先頭へ1フレームずつシークします。`FLAG_CONCURRENT`非対応プラグインでは並列モードをスキップします。動画は`videos/manifest.csv`から読み込み、結果は`results/<DLL名>.csv`へ出力します。
 
 ローカルビルドした`ffmpeg_aui2.dll`を直接ロードする場合は、FFmpegの共有DLLを検索できるようにしてください。
 
@@ -28,6 +28,9 @@ cargo run --release -p ffmpeg-aui2-benchmark -- .\target\release\ffmpeg_aui2.dll
 主なオプション:
 
 - `--mode sequential|parallel|both`
+- `--direction forward|reverse|both`
+- `--process-priority idle|below-normal|normal|above-normal|high`（既定: `high`）
+- `--thread-priority idle|lowest|below-normal|normal|above-normal|highest`（既定: `highest`）
 - `--warmup <FRAMES>`
 - `--frames <FRAMES>`
 - `--output <CSV>`
@@ -35,4 +38,4 @@ cargo run --release -p ffmpeg-aui2-benchmark -- .\target\release\ffmpeg_aui2.dll
 - `--video <FILE>`（複数指定するとmanifestを使わない）
 - `--verify-frame <FRAME>`（複数指定すると指定順に読み込み、計測外で出力ダイジェストを表示する）
 
-CSVは1回の入力読み込みにつき1行で、`mode,frame,input_index,file,duration_ns,bytes,frame_wall_ns`を記録します。実効FPSは8入力すべての読み込みが完了するまでの`frame_wall_ns`から算出します。DLLロード、入力オープン、インデックス生成はフレーム計測に含めません。
+CSVは1回の入力読み込みにつき1行で、`mode,direction,frame,input_index,file,duration_ns,bytes,frame_wall_ns,process_working_set_bytes,process_private_bytes`を記録します。実効FPSは8入力すべての読み込みが完了するまでの`frame_wall_ns`から算出します。メモリはプラグインとデコーダーを含むベンチマークプロセス全体をフレーム計測後に取得し、サマリーには各モードの平均・最大値を表示します。DLLロード、入力オープン、インデックス生成はフレーム計測に含めません。

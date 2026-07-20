@@ -6,7 +6,9 @@ use anyhow::Context;
 use serde::Serialize;
 
 use crate::manifest::VideoSource;
+use crate::memory::ProcessMemory;
 use crate::plugin::{InputHandle, LoadedPlugin};
+use crate::priority::ThreadPriority;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchmarkMode {
@@ -23,11 +25,37 @@ impl BenchmarkMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameDirection {
+    Forward,
+    Reverse,
+}
+
+impl FrameDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::Reverse => "reverse",
+        }
+    }
+
+    fn frame_at(self, step: u32, total_frames: u32) -> u32 {
+        match self {
+            Self::Forward => step,
+            Self::Reverse => total_frames
+                .checked_sub(step + 1)
+                .expect("reverse frame step exceeds total frames"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct FrameSample {
     pub mode: BenchmarkMode,
+    pub direction: FrameDirection,
     pub frame: u32,
     pub wall: Duration,
+    pub memory: ProcessMemory,
     pub calls: Vec<CallSample>,
 }
 
@@ -47,6 +75,7 @@ struct WorkerResult {
 #[derive(Debug)]
 pub struct Summary {
     pub mode: BenchmarkMode,
+    pub direction: FrameDirection,
     pub frames: usize,
     pub inputs: usize,
     pub total: Duration,
@@ -56,17 +85,24 @@ pub struct Summary {
     pub p95_ms: f64,
     pub min_ms: f64,
     pub max_ms: f64,
+    pub average_working_set_mib: f64,
+    pub max_working_set_mib: f64,
+    pub average_private_mib: f64,
+    pub max_private_mib: f64,
 }
 
 #[derive(Serialize)]
 struct CsvRow<'a> {
     mode: &'static str,
+    direction: &'static str,
     frame: u32,
     input_index: usize,
     file: &'a str,
     duration_ns: u64,
     bytes: usize,
     frame_wall_ns: u64,
+    process_working_set_bytes: u64,
+    process_private_bytes: u64,
 }
 
 pub fn prepare_inputs(plugin: &LoadedPlugin, videos: &[VideoSource]) -> anyhow::Result<Duration> {
@@ -106,6 +142,8 @@ pub fn run(
     warmup: u32,
     frames: u32,
     mode: BenchmarkMode,
+    direction: FrameDirection,
+    thread_priority: ThreadPriority,
 ) -> anyhow::Result<Vec<FrameSample>> {
     let handles = open_inputs(plugin, videos)?;
     let required_frames = warmup
@@ -121,13 +159,13 @@ pub fn run(
     }
 
     match mode {
-        BenchmarkMode::Sequential => run_sequential(handles, warmup, frames),
+        BenchmarkMode::Sequential => run_sequential(handles, warmup, frames, direction),
         BenchmarkMode::Parallel => {
             anyhow::ensure!(
                 plugin.is_concurrent(),
                 "Parallel mode requires INPUT_PLUGIN_TABLE::FLAG_CONCURRENT"
             );
-            run_parallel(handles, warmup, frames)
+            run_parallel(handles, warmup, frames, direction, thread_priority)
         }
     }
 }
@@ -163,11 +201,13 @@ fn run_sequential(
     mut handles: Vec<InputHandle>,
     warmup: u32,
     frames: u32,
+    direction: FrameDirection,
 ) -> anyhow::Result<Vec<FrameSample>> {
     let total_frames = warmup + frames;
     let mut samples = Vec::with_capacity(frames as usize);
 
-    for frame in 0..total_frames {
+    for step in 0..total_frames {
+        let frame = direction.frame_at(step, total_frames);
         let wall_started = Instant::now();
         let calls = handles
             .iter_mut()
@@ -183,11 +223,13 @@ fn run_sequential(
             .collect::<anyhow::Result<Vec<_>>>()?;
         let wall = wall_started.elapsed();
 
-        if frame >= warmup {
+        if step >= warmup {
             samples.push(FrameSample {
                 mode: BenchmarkMode::Sequential,
+                direction,
                 frame,
                 wall,
+                memory: crate::memory::current_process_memory()?,
                 calls,
             });
         }
@@ -200,6 +242,8 @@ fn run_parallel(
     handles: Vec<InputHandle>,
     warmup: u32,
     frames: u32,
+    direction: FrameDirection,
+    thread_priority: ThreadPriority,
 ) -> anyhow::Result<Vec<FrameSample>> {
     let total_frames = warmup + frames;
     let input_count = handles.len();
@@ -211,11 +255,18 @@ fn run_parallel(
             let barrier = Arc::clone(&barrier);
             let sender = sender.clone();
             scope.spawn(move || {
-                for frame in 0..total_frames {
+                let priority_error = crate::priority::set_current_thread_priority(thread_priority)
+                    .err()
+                    .map(|error| format!("Failed to set worker thread priority: {error:#}"));
+                for step in 0..total_frames {
+                    let frame = direction.frame_at(step, total_frames);
                     barrier.wait();
-                    let measurement = handle
-                        .read_frame(i32::try_from(frame).expect("frame index exceeds i32"))
-                        .map_err(|error| format!("{error:#}"));
+                    let measurement = match &priority_error {
+                        Some(error) => Err(error.clone()),
+                        None => handle
+                            .read_frame(i32::try_from(frame).expect("frame index exceeds i32"))
+                            .map_err(|error| format!("{error:#}")),
+                    };
                     sender
                         .send(WorkerResult {
                             input_index,
@@ -230,7 +281,8 @@ fn run_parallel(
 
         let mut samples = Vec::with_capacity(frames as usize);
         let mut first_error = None;
-        for frame in 0..total_frames {
+        for step in 0..total_frames {
+            let frame = direction.frame_at(step, total_frames);
             let wall_started = Instant::now();
             barrier.wait();
             barrier.wait();
@@ -257,11 +309,13 @@ fn run_parallel(
             }
             calls.sort_by_key(|call| call.input_index);
 
-            if frame >= warmup && calls.len() == input_count {
+            if step >= warmup && calls.len() == input_count {
                 samples.push(FrameSample {
                     mode: BenchmarkMode::Parallel,
+                    direction,
                     frame,
                     wall,
+                    memory: crate::memory::current_process_memory()?,
                     calls,
                 });
             }
@@ -296,12 +350,15 @@ pub fn write_csv(
             let file = video.path.to_string_lossy();
             writer.serialize(CsvRow {
                 mode: frame.mode.as_str(),
+                direction: frame.direction.as_str(),
                 frame: frame.frame,
                 input_index: call.input_index,
                 file: &file,
                 duration_ns: duration_ns(call.duration)?,
                 bytes: call.bytes,
                 frame_wall_ns,
+                process_working_set_bytes: frame.memory.working_set_bytes,
+                process_private_bytes: frame.memory.private_bytes,
             })?;
         }
     }
@@ -314,6 +371,12 @@ pub fn summarize(samples: &[FrameSample]) -> anyhow::Result<Summary> {
     anyhow::ensure!(
         samples.iter().all(|sample| sample.mode == first.mode),
         "Cannot summarize mixed benchmark modes"
+    );
+    anyhow::ensure!(
+        samples
+            .iter()
+            .all(|sample| sample.direction == first.direction),
+        "Cannot summarize mixed frame directions"
     );
     let inputs = first.calls.len();
     anyhow::ensure!(inputs > 0, "Benchmark samples contain no input calls");
@@ -331,9 +394,28 @@ pub fn summarize(samples: &[FrameSample]) -> anyhow::Result<Summary> {
     let total = Duration::from_nanos(u64::try_from(total_ns).context("Total duration overflowed")?);
     let frames = samples.len();
     let average_ns = total_ns as f64 / frames as f64;
+    let total_working_set_bytes = samples
+        .iter()
+        .map(|sample| u128::from(sample.memory.working_set_bytes))
+        .sum::<u128>();
+    let total_private_bytes = samples
+        .iter()
+        .map(|sample| u128::from(sample.memory.private_bytes))
+        .sum::<u128>();
+    let max_working_set_bytes = samples
+        .iter()
+        .map(|sample| sample.memory.working_set_bytes)
+        .max()
+        .expect("benchmark samples must not be empty");
+    let max_private_bytes = samples
+        .iter()
+        .map(|sample| sample.memory.private_bytes)
+        .max()
+        .expect("benchmark samples must not be empty");
 
     Ok(Summary {
         mode: first.mode,
+        direction: first.direction,
         frames,
         inputs,
         total,
@@ -343,13 +425,18 @@ pub fn summarize(samples: &[FrameSample]) -> anyhow::Result<Summary> {
         p95_ms: percentile(&walls, 0.95) as f64 / 1_000_000.0,
         min_ms: walls[0] as f64 / 1_000_000.0,
         max_ms: walls[walls.len() - 1] as f64 / 1_000_000.0,
+        average_working_set_mib: bytes_to_mib(total_working_set_bytes as f64 / frames as f64),
+        max_working_set_mib: bytes_to_mib(max_working_set_bytes as f64),
+        average_private_mib: bytes_to_mib(total_private_bytes as f64 / frames as f64),
+        max_private_mib: bytes_to_mib(max_private_bytes as f64),
     })
 }
 
 pub fn print_summary(summary: &Summary) {
     println!(
-        "mode={} frames={} inputs={} total={:.3}s fps={:.3} avg={:.3}ms median={:.3}ms p95={:.3}ms min={:.3}ms max={:.3}ms",
+        "mode={} direction={} frames={} inputs={} total={:.3}s fps={:.3} avg={:.3}ms median={:.3}ms p95={:.3}ms min={:.3}ms max={:.3}ms working_set_avg={:.1}MiB working_set_max={:.1}MiB private_avg={:.1}MiB private_max={:.1}MiB",
         summary.mode.as_str(),
+        summary.direction.as_str(),
         summary.frames,
         summary.inputs,
         summary.total.as_secs_f64(),
@@ -359,7 +446,15 @@ pub fn print_summary(summary: &Summary) {
         summary.p95_ms,
         summary.min_ms,
         summary.max_ms,
+        summary.average_working_set_mib,
+        summary.max_working_set_mib,
+        summary.average_private_mib,
+        summary.max_private_mib,
     );
+}
+
+fn bytes_to_mib(bytes: f64) -> f64 {
+    bytes / (1024.0 * 1024.0)
 }
 
 fn duration_ns(duration: Duration) -> anyhow::Result<u64> {
@@ -380,8 +475,13 @@ mod tests {
     fn sample(mode: BenchmarkMode, milliseconds: u64) -> FrameSample {
         FrameSample {
             mode,
+            direction: FrameDirection::Forward,
             frame: 0,
             wall: Duration::from_millis(milliseconds),
+            memory: ProcessMemory {
+                working_set_bytes: milliseconds * 1024 * 1024,
+                private_bytes: milliseconds * 2 * 1024 * 1024,
+            },
             calls: vec![CallSample {
                 input_index: 0,
                 duration: Duration::from_millis(milliseconds),
@@ -403,6 +503,10 @@ mod tests {
         assert_eq!(summary.p95_ms, 100.0);
         assert_eq!(summary.min_ms, 1.0);
         assert_eq!(summary.max_ms, 100.0);
+        assert_eq!(summary.average_working_set_mib, 22.0);
+        assert_eq!(summary.max_working_set_mib, 100.0);
+        assert_eq!(summary.average_private_mib, 44.0);
+        assert_eq!(summary.max_private_mib, 200.0);
     }
 
     #[test]
@@ -413,5 +517,14 @@ mod tests {
         ];
 
         assert!(summarize(&samples).is_err());
+    }
+
+    #[test]
+    fn reverse_direction_maps_steps_to_descending_frames() {
+        let frames = (0..4)
+            .map(|step| FrameDirection::Reverse.frame_at(step, 4))
+            .collect::<Vec<_>>();
+
+        assert_eq!(frames, vec![3, 2, 1, 0]);
     }
 }
