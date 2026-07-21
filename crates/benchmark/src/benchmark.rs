@@ -77,6 +77,7 @@ pub struct Summary {
     pub mode: BenchmarkMode,
     pub direction: FrameDirection,
     pub frames: usize,
+    pub outliers_removed: usize,
     pub inputs: usize,
     pub total: Duration,
     pub fps: f64,
@@ -385,15 +386,24 @@ pub fn summarize(samples: &[FrameSample]) -> anyhow::Result<Summary> {
         "Input count changed during benchmark"
     );
 
-    let mut walls = samples
+    let mut all_walls = samples
         .iter()
         .map(|sample| duration_ns(sample.wall))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    walls.sort_unstable();
+    all_walls.sort_unstable();
+    let (lower_bound, upper_bound) = tukey_bounds(&all_walls);
+    let walls = all_walls
+        .iter()
+        .copied()
+        .filter(|wall| (lower_bound..=upper_bound).contains(wall))
+        .collect::<Vec<_>>();
+    assert!(!walls.is_empty(), "outlier filter removed every sample");
     let total_ns = walls.iter().map(|value| u128::from(*value)).sum::<u128>();
     let total = Duration::from_nanos(u64::try_from(total_ns).context("Total duration overflowed")?);
-    let frames = samples.len();
+    let frames = walls.len();
+    let outliers_removed = all_walls.len() - frames;
     let average_ns = total_ns as f64 / frames as f64;
+    let memory_samples = samples.len();
     let total_working_set_bytes = samples
         .iter()
         .map(|sample| u128::from(sample.memory.working_set_bytes))
@@ -417,6 +427,7 @@ pub fn summarize(samples: &[FrameSample]) -> anyhow::Result<Summary> {
         mode: first.mode,
         direction: first.direction,
         frames,
+        outliers_removed,
         inputs,
         total,
         fps: frames as f64 / total.as_secs_f64(),
@@ -425,20 +436,23 @@ pub fn summarize(samples: &[FrameSample]) -> anyhow::Result<Summary> {
         p95_ms: percentile(&walls, 0.95) as f64 / 1_000_000.0,
         min_ms: walls[0] as f64 / 1_000_000.0,
         max_ms: walls[walls.len() - 1] as f64 / 1_000_000.0,
-        average_working_set_mib: bytes_to_mib(total_working_set_bytes as f64 / frames as f64),
+        average_working_set_mib: bytes_to_mib(
+            total_working_set_bytes as f64 / memory_samples as f64,
+        ),
         max_working_set_mib: bytes_to_mib(max_working_set_bytes as f64),
-        average_private_mib: bytes_to_mib(total_private_bytes as f64 / frames as f64),
+        average_private_mib: bytes_to_mib(total_private_bytes as f64 / memory_samples as f64),
         max_private_mib: bytes_to_mib(max_private_bytes as f64),
     })
 }
 
 pub fn print_summary(plugin_name: &str, summary: &Summary) {
     println!(
-        "plugin={} mode={} direction={} frames={} inputs={} total={:.3}s fps={:.3} avg={:.3}ms median={:.3}ms p95={:.3}ms min={:.3}ms max={:.3}ms working_set_avg={:.1}MiB working_set_max={:.1}MiB private_avg={:.1}MiB private_max={:.1}MiB",
+        "plugin={} mode={} direction={} frames={} outliers_removed={} inputs={} total={:.3}s fps={:.3} avg={:.3}ms median={:.3}ms p95={:.3}ms min={:.3}ms max={:.3}ms working_set_avg={:.1}MiB working_set_max={:.1}MiB private_avg={:.1}MiB private_max={:.1}MiB",
         plugin_name,
         summary.mode.as_str(),
         summary.direction.as_str(),
         summary.frames,
+        summary.outliers_removed,
         summary.inputs,
         summary.total.as_secs_f64(),
         summary.fps,
@@ -469,6 +483,20 @@ fn percentile(sorted: &[u64], quantile: f64) -> u64 {
     sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
+fn tukey_bounds(sorted: &[u64]) -> (u64, u64) {
+    assert!(!sorted.is_empty());
+    let first_quartile = u128::from(percentile(sorted, 0.25));
+    let third_quartile = u128::from(percentile(sorted, 0.75));
+    let interquartile_range = third_quartile - first_quartile;
+    let margin = interquartile_range * 3 / 2;
+    let lower_bound = first_quartile.saturating_sub(margin);
+    let upper_bound = third_quartile + margin;
+    (
+        u64::try_from(lower_bound).expect("Tukey lower bound exceeds u64"),
+        u64::try_from(upper_bound).expect("Tukey upper bound exceeds u64"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_reports_nearest_rank_percentiles() {
+    fn summary_removes_tukey_outliers_before_calculating_timings() {
         let samples = [1, 2, 3, 4, 100]
             .into_iter()
             .map(|milliseconds| sample(BenchmarkMode::Sequential, milliseconds))
@@ -500,10 +528,13 @@ mod tests {
 
         let summary = summarize(&samples).unwrap();
 
-        assert_eq!(summary.median_ms, 3.0);
-        assert_eq!(summary.p95_ms, 100.0);
+        assert_eq!(summary.frames, 4);
+        assert_eq!(summary.outliers_removed, 1);
+        assert_eq!(summary.average_ms, 2.5);
+        assert_eq!(summary.median_ms, 2.0);
+        assert_eq!(summary.p95_ms, 4.0);
         assert_eq!(summary.min_ms, 1.0);
-        assert_eq!(summary.max_ms, 100.0);
+        assert_eq!(summary.max_ms, 4.0);
         assert_eq!(summary.average_working_set_mib, 22.0);
         assert_eq!(summary.max_working_set_mib, 100.0);
         assert_eq!(summary.average_private_mib, 44.0);

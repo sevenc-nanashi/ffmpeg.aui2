@@ -38,4 +38,4 @@ cargo run --release -p ffmpeg-aui2-benchmark -- .\target\release\ffmpeg_aui2.dll
 - `--video <FILE>`（複数指定するとmanifestを使わない）
 - `--verify-frame <FRAME>`（複数指定すると指定順に読み込み、計測外で出力ダイジェストを表示する）
 
-CSVは1回の入力読み込みにつき1行で、`mode,direction,frame,input_index,file,duration_ns,bytes,frame_wall_ns,process_working_set_bytes,process_private_bytes`を記録します。実効FPSは8入力すべての読み込みが完了するまでの`frame_wall_ns`から算出します。メモリはプラグインとデコーダーを含むベンチマークプロセス全体をフレーム計測後に取得し、サマリーには各モードの平均・最大値を表示します。DLLロード、入力オープン、インデックス生成はフレーム計測に含めません。
+CSVは1回の入力読み込みにつき1行で、`mode,direction,frame,input_index,file,duration_ns,bytes,frame_wall_ns,process_working_set_bytes,process_private_bytes`を記録します。実効FPSは8入力すべての読み込みが完了するまでの`frame_wall_ns`から算出します。サマリーではTukey法により1.5×IQRの範囲外にあるフレーム時間を除外し、除外数を`outliers_removed`として表示します。CSVには除外前の生データを記録します。メモリはプラグインとデコーダーを含むベンチマークプロセス全体をフレーム計測後に取得し、外れ値を除外せず各モードの平均・最大値を表示します。DLLロード、入力オープン、インデックス生成はフレーム計測に含めません。
