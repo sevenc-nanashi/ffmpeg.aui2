@@ -6,6 +6,54 @@ use rayon::prelude::*;
 
 const FORWARD_SEEK_THRESHOLD: usize = 10;
 
+#[derive(Default)]
+pub struct DisplayTransform {
+    filter_chain: String,
+    pub transpose: bool,
+}
+
+impl DisplayTransform {
+    pub fn from_stream(stream: &ffmpeg_next::Stream<'_>) -> anyhow::Result<Self> {
+        let Some(side_data) = stream
+            .side_data()
+            .find(|data| data.kind() == ffmpeg_next::packet::side_data::Type::DisplayMatrix)
+        else {
+            return Ok(Self::default());
+        };
+        let matrix = <[i32; 9] as zerocopy::FromBytes>::read_from_bytes(side_data.data())
+            .map_err(|_| anyhow::anyhow!("Invalid display matrix size"))?;
+        Self::from_matrix(&matrix)
+    }
+
+    fn from_matrix(matrix: &[i32; 9]) -> anyhow::Result<Self> {
+        // FFmpeg reports counterclockwise angles; filters use clockwise angles.
+        let rotation = -unsafe { ffmpeg_next::ffi::av_display_rotation_get(matrix.as_ptr()) };
+        anyhow::ensure!(rotation.is_finite(), "Invalid display matrix rotation");
+        let rotation = rotation.round().rem_euclid(360.0);
+        let filter_chain = match rotation as u32 {
+            90 if matrix[3] > 0 => "transpose=cclock_flip".into(),
+            90 => "transpose=clock".into(),
+            180 => [
+                (matrix[0] < 0).then_some("hflip"),
+                (matrix[4] < 0).then_some("vflip"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(","),
+            270 if matrix[3] < 0 => "transpose=clock_flip".into(),
+            270 => "transpose=cclock".into(),
+            0 if matrix[4] < 0 => "vflip".into(),
+            0 => String::new(),
+            _ => format!("rotate={rotation}*PI/180"),
+        };
+        Ok(Self {
+            filter_chain,
+            transpose: matches!(rotation as u32, 90 | 270),
+        })
+    }
+}
+
 pub struct Yuy2Converter {
     scaler: Option<ffmpeg_next::software::scaling::Context>,
     source: Option<(ffmpeg_next::format::Pixel, u32, u32)>,
@@ -55,6 +103,8 @@ pub struct VideoDecoderState {
     pub decoder: ffmpeg_next::decoder::Video,
     pub scaler: Option<ffmpeg_next::software::scaling::Context>,
     pub hdr_filter_graph: Option<ffmpeg_next::filter::Graph>,
+    display_transform: DisplayTransform,
+    display_filter_graph: Option<ffmpeg_next::filter::Graph>,
     pub stream_index: usize,
     pub time_base: ffmpeg_next::Rational,
     pub current_ts: f64,
@@ -81,6 +131,8 @@ impl VideoDecoderState {
             .ok_or_else(|| anyhow::anyhow!("Video stream {} not found", stream_index))?
             .time_base();
         let codec_params = input.stream(stream_index).unwrap().parameters();
+        let display_transform =
+            DisplayTransform::from_stream(&input.stream(stream_index).unwrap())?;
         let mut codec_ctx = ffmpeg_next::codec::context::Context::from_parameters(codec_params)?;
         let codec = ffmpeg_next::codec::decoder::find(codec_ctx.id()).ok_or_else(|| {
             anyhow::anyhow!("Unsupported codec for video stream {}", stream_index)
@@ -111,6 +163,8 @@ impl VideoDecoderState {
             decoder,
             scaler: None,
             hdr_filter_graph: None,
+            display_transform,
+            display_filter_graph: None,
             stream_index,
             time_base,
             current_ts: f64::NEG_INFINITY,
@@ -182,17 +236,47 @@ impl VideoDecoderState {
         } else {
             frame
         };
+        self.apply_display_transform(frame)
+    }
+
+    fn apply_display_transform(
+        &mut self,
+        mut frame: ffmpeg_next::frame::Video,
+    ) -> anyhow::Result<ffmpeg_next::frame::Video> {
+        if self.display_transform.filter_chain.is_empty() {
+            return Ok(frame);
+        }
+        if self.display_filter_graph.is_none() {
+            self.display_filter_graph = Some(Self::build_filter_graph(
+                &frame,
+                self.time_base,
+                &self.display_transform.filter_chain,
+            )?);
+        }
+        let graph = self.display_filter_graph.as_mut().unwrap();
+        graph
+            .get("in")
+            .unwrap()
+            .source()
+            .add(&frame)
+            .context("Failed to add frame to display transform")?;
+        graph
+            .get("out")
+            .unwrap()
+            .sink()
+            .frame(&mut frame)
+            .context("Failed to get frame from display transform")?;
         Ok(frame)
     }
 
     pub fn ensure_scaler(
         &mut self,
         output_format: &VideoOutputFormat,
-        src_fmt: ffmpeg_next::format::Pixel,
+        frame: &ffmpeg_next::frame::Video,
     ) -> anyhow::Result<()> {
         if self.scaler.is_none() {
-            let width = self.decoder.width();
-            let height = self.decoder.height();
+            let width = frame.width();
+            let height = frame.height();
             let dst_fmt = match output_format {
                 VideoOutputFormat::Yuy2 => ffmpeg_next::format::Pixel::YUYV422,
                 VideoOutputFormat::Bgra => ffmpeg_next::format::Pixel::BGRA,
@@ -200,7 +284,7 @@ impl VideoDecoderState {
             };
             self.scaler = Some(
                 ffmpeg_next::software::scaling::Context::get(
-                    src_fmt,
+                    frame.format(),
                     width,
                     height,
                     dst_fmt,
@@ -245,17 +329,19 @@ impl VideoDecoderState {
     }
 
     fn build_filter_graph(
-        &self,
         frame: &ffmpeg_next::frame::Video,
+        time_base: ffmpeg_next::Rational,
         filter_chain: &str,
     ) -> anyhow::Result<ffmpeg_next::filter::Graph> {
         let args = format!(
-            "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect=1/1",
+            "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect=1/1:colorspace={}:range={}",
             frame.width(),
             frame.height(),
             ffmpeg_next::ffi::AVPixelFormat::from(frame.format()) as i32,
-            self.time_base.numerator(),
-            self.time_base.denominator(),
+            time_base.numerator(),
+            time_base.denominator(),
+            ffmpeg_next::ffi::AVColorSpace::from(frame.color_space()) as i32,
+            ffmpeg_next::ffi::AVColorRange::from(frame.color_range()) as i32,
         );
 
         let mut graph = ffmpeg_next::filter::Graph::new();
@@ -279,8 +365,9 @@ impl VideoDecoderState {
 
     fn ensure_hdr_filter(&mut self, frame: &ffmpeg_next::frame::Video) -> anyhow::Result<()> {
         if self.hdr_filter_graph.is_none() {
-            self.hdr_filter_graph = Some(self.build_filter_graph(
+            self.hdr_filter_graph = Some(Self::build_filter_graph(
                 frame,
+                self.time_base,
                 "zscale=transfer=linear:range=full:rangein=full,format=pix_fmts=gbrpf32le",
             )?);
         }
@@ -367,7 +454,7 @@ impl VideoDecoderState {
         frame_index: usize,
         output: &mut [u8],
     ) -> anyhow::Result<()> {
-        self.ensure_scaler(&VideoOutputFormat::Yuy2, frame.format())?;
+        self.ensure_scaler(&VideoOutputFormat::Yuy2, frame)?;
         Self::scale_packed_frame_to_slice(self.scaler.as_mut().unwrap(), frame, 2, false, output)?;
         self.output_buffer.clear();
         self.output_frame_index = Some(frame_index);
@@ -386,7 +473,7 @@ impl VideoDecoderState {
             return Self::hf64_frame_to_bytes(&self.filter_output_frame, output);
         }
 
-        self.ensure_scaler(output_format, frame.format())?;
+        self.ensure_scaler(output_format, frame)?;
 
         {
             let scaler = self.scaler.as_mut().unwrap();
@@ -688,6 +775,67 @@ fn is_hdr_transfer(frame: &ffmpeg_next::frame::Video) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_matrix_transforms_pixels_and_dimensions() {
+        ffmpeg_next::init().unwrap();
+        for (angle, hflip, vflip, width, height, expected) in [
+            (0.0, 0, 0, 3, 2, [1, 2, 3, 4, 5, 6]),
+            (90.0, 0, 0, 2, 3, [4, 1, 5, 2, 6, 3]),
+            (180.0, 0, 0, 3, 2, [6, 5, 4, 3, 2, 1]),
+            (270.0, 0, 0, 2, 3, [3, 6, 2, 5, 1, 4]),
+            (0.0, 1, 0, 3, 2, [3, 2, 1, 6, 5, 4]),
+            (0.0, 0, 1, 3, 2, [4, 5, 6, 1, 2, 3]),
+            (90.0, 1, 0, 2, 3, [1, 4, 2, 5, 3, 6]),
+            (270.0, 1, 0, 2, 3, [6, 3, 5, 2, 4, 1]),
+        ] {
+            let mut matrix = [0; 9];
+            unsafe {
+                ffmpeg_next::ffi::av_display_rotation_set(matrix.as_mut_ptr(), angle);
+                ffmpeg_next::ffi::av_display_matrix_flip(matrix.as_mut_ptr(), hflip, vflip);
+            }
+            let transform = DisplayTransform::from_matrix(&matrix).unwrap();
+            assert_eq!(transform.transpose, width == 2);
+            let mut frame = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::GRAY8, 3, 2);
+            let stride = frame.stride(0);
+            frame.data_mut(0)[..3].copy_from_slice(&[1, 2, 3]);
+            frame.data_mut(0)[stride..stride + 3].copy_from_slice(&[4, 5, 6]);
+            frame.set_pts(Some(42));
+            frame.set_color_space(ffmpeg_next::color::Space::BT709);
+            frame.set_color_range(ffmpeg_next::color::Range::JPEG);
+            if !transform.filter_chain.is_empty() {
+                let mut graph = VideoDecoderState::build_filter_graph(
+                    &frame,
+                    (1, 30).into(),
+                    &transform.filter_chain,
+                )
+                .unwrap();
+                graph.get("in").unwrap().source().add(&frame).unwrap();
+                graph.get("out").unwrap().sink().frame(&mut frame).unwrap();
+            }
+            assert_eq!((frame.width(), frame.height()), (width, height));
+            assert_eq!(frame.pts(), Some(42));
+            assert_eq!(frame.color_space(), ffmpeg_next::color::Space::BT709);
+            assert_eq!(frame.color_range(), ffmpeg_next::color::Range::JPEG);
+            // vflip can return a negative stride, which frame.data() cannot represent.
+            let pixels: Vec<_> = (0..height)
+                .flat_map(|y| unsafe {
+                    let raw = &*frame.as_ptr();
+                    std::slice::from_raw_parts(
+                        raw.data[0].offset(y as isize * raw.linesize[0] as isize),
+                        width as usize,
+                    )
+                    .iter()
+                    .copied()
+                })
+                .collect();
+            assert_eq!(
+                pixels, expected,
+                "angle={angle}, hflip={hflip}, vflip={vflip}"
+            );
+        }
+        assert!(DisplayTransform::from_matrix(&[0; 9]).is_err());
+    }
 
     #[test]
     fn seek_decision_matches_lwlibav_forward_threshold() {

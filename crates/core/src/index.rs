@@ -330,6 +330,14 @@ pub fn create_index(
             _ => None,
         })
         .collect::<Vec<_>>();
+    for track in &mut tracks {
+        if let TrackInfo::Video(video) = track {
+            let stream = input.stream(video.stream_index).unwrap();
+            if crate::video::DisplayTransform::from_stream(&stream)?.transpose {
+                std::mem::swap(&mut video.width, &mut video.height);
+            }
+        }
+    }
     let largest_video_size = tracks.iter().fold((0u32, 0u32), |acc, track| {
         if let TrackInfo::Video(v) = track {
             if v.width as u64 * v.height as u64 > acc.0 as u64 * acc.1 as u64 {
