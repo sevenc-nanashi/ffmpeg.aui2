@@ -6,9 +6,11 @@ mod memory;
 mod plugin;
 mod priority;
 
+use std::time::Duration;
+
 use clap::Parser;
 
-use benchmark::{BenchmarkMode, FrameDirection};
+use benchmark::{BenchmarkMode, FrameDirection, RunOptions};
 use cli::{Args, ExecutionMode};
 
 fn modes_for_plugin(
@@ -81,21 +83,29 @@ fn main() -> anyhow::Result<()> {
     for mode in modes {
         for &direction in &directions {
             println!(
-                "running plugin={} mode={} direction={} warmup={} frames={}",
+                "running plugin={} mode={} direction={} warmup={} frames={} read_delay_ms={} frame_skip={}..{}",
                 plugin.name(),
                 mode.as_str(),
                 direction.as_str(),
                 args.warmup,
-                args.frames
+                args.frames,
+                args.read_delay_ms,
+                args.frame_skip_min,
+                args.frame_skip_max
             );
             let samples = benchmark::run(
                 &plugin,
                 &videos,
-                args.warmup,
-                args.frames,
-                mode,
-                direction,
-                args.thread_priority,
+                RunOptions {
+                    warmup: args.warmup,
+                    frames: args.frames,
+                    mode,
+                    direction,
+                    thread_priority: args.thread_priority,
+                    read_delay: Duration::from_millis(args.read_delay_ms),
+                    frame_skip_min: args.frame_skip_min,
+                    frame_skip_max: args.frame_skip_max,
+                },
             )?;
             let summary = benchmark::summarize(&samples)?;
             benchmark::print_summary(plugin.name(), &summary);

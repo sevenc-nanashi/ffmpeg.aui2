@@ -38,14 +38,47 @@ impl FrameDirection {
             Self::Reverse => "reverse",
         }
     }
+}
 
-    fn frame_at(self, step: u32, total_frames: u32) -> u32 {
-        match self {
-            Self::Forward => step,
-            Self::Reverse => total_frames
-                .checked_sub(step + 1)
-                .expect("reverse frame step exceeds total frames"),
+#[derive(Debug, Clone, Copy)]
+struct FramePattern {
+    direction: FrameDirection,
+    skip_min: u32,
+    skip_max: u32,
+}
+
+impl FramePattern {
+    fn frame_at(self, step: u32, total_requests: u32) -> u32 {
+        assert!(self.skip_min <= self.skip_max);
+        assert!(step < total_requests);
+        let forward_frame = self.forward_frame_at(step);
+        match self.direction {
+            FrameDirection::Forward => forward_frame,
+            FrameDirection::Reverse => self
+                .forward_frame_at(total_requests - 1)
+                .checked_sub(forward_frame)
+                .expect("reverse frame step exceeds frame range"),
         }
+    }
+
+    fn required_frames(self, total_requests: u32) -> u32 {
+        assert!(total_requests > 0);
+        self.forward_frame_at(total_requests - 1)
+            .checked_add(1)
+            .expect("required frame count overflowed")
+    }
+
+    fn forward_frame_at(self, step: u32) -> u32 {
+        assert!(self.skip_min <= self.skip_max);
+        let range_length = u128::from(self.skip_max - self.skip_min) + 1;
+        let completed_cycles = u128::from(step) / range_length;
+        let remainder = u128::from(step) % range_length;
+        let skip_min = u128::from(self.skip_min);
+        let skip_max = u128::from(self.skip_max);
+        let cycle_skip_sum = (skip_min + skip_max) * range_length / 2;
+        let remainder_skip_sum = remainder * skip_min + remainder * remainder.saturating_sub(1) / 2;
+        let frame = u128::from(step) + completed_cycles * cycle_skip_sum + remainder_skip_sum;
+        u32::try_from(frame).expect("requested frame exceeds u32")
     }
 }
 
@@ -57,6 +90,18 @@ pub struct FrameSample {
     pub wall: Duration,
     pub memory: ProcessMemory,
     pub calls: Vec<CallSample>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RunOptions {
+    pub warmup: u32,
+    pub frames: u32,
+    pub mode: BenchmarkMode,
+    pub direction: FrameDirection,
+    pub thread_priority: ThreadPriority,
+    pub read_delay: Duration,
+    pub frame_skip_min: u32,
+    pub frame_skip_max: u32,
 }
 
 #[derive(Debug)]
@@ -140,16 +185,19 @@ pub fn verify_frames(
 pub fn run(
     plugin: &LoadedPlugin,
     videos: &[VideoSource],
-    warmup: u32,
-    frames: u32,
-    mode: BenchmarkMode,
-    direction: FrameDirection,
-    thread_priority: ThreadPriority,
+    options: RunOptions,
 ) -> anyhow::Result<Vec<FrameSample>> {
     let handles = open_inputs(plugin, videos)?;
-    let required_frames = warmup
-        .checked_add(frames)
+    let total_requests = options
+        .warmup
+        .checked_add(options.frames)
         .context("warmup + frames overflowed")?;
+    let pattern = FramePattern {
+        direction: options.direction,
+        skip_min: options.frame_skip_min,
+        skip_max: options.frame_skip_max,
+    };
+    let required_frames = pattern.required_frames(total_requests);
     for handle in &handles {
         anyhow::ensure!(
             handle.total_frames() >= i32::try_from(required_frames)?,
@@ -159,14 +207,27 @@ pub fn run(
         );
     }
 
-    match mode {
-        BenchmarkMode::Sequential => run_sequential(handles, warmup, frames, direction),
+    match options.mode {
+        BenchmarkMode::Sequential => run_sequential(
+            handles,
+            options.warmup,
+            options.frames,
+            pattern,
+            options.read_delay,
+        ),
         BenchmarkMode::Parallel => {
             anyhow::ensure!(
                 plugin.is_concurrent(),
                 "Parallel mode requires INPUT_PLUGIN_TABLE::FLAG_CONCURRENT"
             );
-            run_parallel(handles, warmup, frames, direction, thread_priority)
+            run_parallel(
+                handles,
+                options.warmup,
+                options.frames,
+                pattern,
+                options.thread_priority,
+                options.read_delay,
+            )
         }
     }
 }
@@ -202,13 +263,14 @@ fn run_sequential(
     mut handles: Vec<InputHandle>,
     warmup: u32,
     frames: u32,
-    direction: FrameDirection,
+    pattern: FramePattern,
+    read_delay: Duration,
 ) -> anyhow::Result<Vec<FrameSample>> {
     let total_frames = warmup + frames;
     let mut samples = Vec::with_capacity(frames as usize);
 
     for step in 0..total_frames {
-        let frame = direction.frame_at(step, total_frames);
+        let frame = pattern.frame_at(step, total_frames);
         let wall_started = Instant::now();
         let calls = handles
             .iter_mut()
@@ -227,13 +289,14 @@ fn run_sequential(
         if step >= warmup {
             samples.push(FrameSample {
                 mode: BenchmarkMode::Sequential,
-                direction,
+                direction: pattern.direction,
                 frame,
                 wall,
                 memory: crate::memory::current_process_memory()?,
                 calls,
             });
         }
+        sleep_before_next_frame(step, total_frames, read_delay);
     }
 
     Ok(samples)
@@ -243,8 +306,9 @@ fn run_parallel(
     handles: Vec<InputHandle>,
     warmup: u32,
     frames: u32,
-    direction: FrameDirection,
+    pattern: FramePattern,
     thread_priority: ThreadPriority,
+    read_delay: Duration,
 ) -> anyhow::Result<Vec<FrameSample>> {
     let total_frames = warmup + frames;
     let input_count = handles.len();
@@ -260,7 +324,7 @@ fn run_parallel(
                     .err()
                     .map(|error| format!("Failed to set worker thread priority: {error:#}"));
                 for step in 0..total_frames {
-                    let frame = direction.frame_at(step, total_frames);
+                    let frame = pattern.frame_at(step, total_frames);
                     barrier.wait();
                     let measurement = match &priority_error {
                         Some(error) => Err(error.clone()),
@@ -283,7 +347,7 @@ fn run_parallel(
         let mut samples = Vec::with_capacity(frames as usize);
         let mut first_error = None;
         for step in 0..total_frames {
-            let frame = direction.frame_at(step, total_frames);
+            let frame = pattern.frame_at(step, total_frames);
             let wall_started = Instant::now();
             barrier.wait();
             barrier.wait();
@@ -313,13 +377,14 @@ fn run_parallel(
             if step >= warmup && calls.len() == input_count {
                 samples.push(FrameSample {
                     mode: BenchmarkMode::Parallel,
-                    direction,
+                    direction: pattern.direction,
                     frame,
                     wall,
                     memory: crate::memory::current_process_memory()?,
                     calls,
                 });
             }
+            sleep_before_next_frame(step, total_frames, read_delay);
         }
 
         if let Some(error) = first_error {
@@ -327,6 +392,12 @@ fn run_parallel(
         }
         Ok(samples)
     })
+}
+
+fn sleep_before_next_frame(step: u32, total_frames: u32, read_delay: Duration) {
+    if !read_delay.is_zero() && step + 1 < total_frames {
+        std::thread::sleep(read_delay);
+    }
 }
 
 pub fn write_csv(
@@ -553,10 +624,42 @@ mod tests {
 
     #[test]
     fn reverse_direction_maps_steps_to_descending_frames() {
+        let pattern = FramePattern {
+            direction: FrameDirection::Reverse,
+            skip_min: 0,
+            skip_max: 0,
+        };
         let frames = (0..4)
-            .map(|step| FrameDirection::Reverse.frame_at(step, 4))
+            .map(|step| pattern.frame_at(step, 4))
             .collect::<Vec<_>>();
 
         assert_eq!(frames, vec![3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn frame_pattern_cycles_through_skip_range() {
+        let forward = FramePattern {
+            direction: FrameDirection::Forward,
+            skip_min: 1,
+            skip_max: 3,
+        };
+        let reverse = FramePattern {
+            direction: FrameDirection::Reverse,
+            ..forward
+        };
+
+        assert_eq!(
+            (0..5)
+                .map(|step| forward.frame_at(step, 5))
+                .collect::<Vec<_>>(),
+            vec![0, 2, 5, 9, 11]
+        );
+        assert_eq!(
+            (0..5)
+                .map(|step| reverse.frame_at(step, 5))
+                .collect::<Vec<_>>(),
+            vec![11, 9, 6, 2, 0]
+        );
+        assert_eq!(forward.required_frames(5), 12);
     }
 }

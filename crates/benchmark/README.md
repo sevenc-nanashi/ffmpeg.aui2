@@ -33,6 +33,8 @@ cargo run --release -p ffmpeg-aui2-benchmark -- .\target\release\ffmpeg_aui2.dll
 - `--thread-priority idle|lowest|below-normal|normal|above-normal|highest`（既定: `highest`）
 - `--warmup <FRAMES>`
 - `--frames <FRAMES>`
+- `--read-delay-ms <MILLISECONDS>`（次のフレームを要求するまでの待機時間。計測時間には含まない）
+- `--frame-skip-min <FRAMES>` / `--frame-skip-max <FRAMES>`（リクエスト間で飛ばすフレーム数。範囲内を順番に繰り返す）
 - `--output <CSV>`
 - `--videos-dir <DIR>`
 - `--video <FILE>`（複数指定するとmanifestを使わない）

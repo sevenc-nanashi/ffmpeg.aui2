@@ -49,6 +49,18 @@ pub struct Args {
     #[arg(long, default_value_t = 300)]
     pub frames: u32,
 
+    /// Delay after each frame batch before requesting the next frame.
+    #[arg(long, default_value_t = 0)]
+    pub read_delay_ms: u64,
+
+    /// Minimum number of frames skipped between requests.
+    #[arg(long, default_value_t = 0)]
+    pub frame_skip_min: u32,
+
+    /// Maximum number of frames skipped between requests.
+    #[arg(long, default_value_t = 0)]
+    pub frame_skip_max: u32,
+
     /// CSV output path.
     #[arg(long)]
     pub output: Option<PathBuf>,
@@ -74,13 +86,21 @@ impl Args {
             self.dll.display()
         );
         anyhow::ensure!(self.frames > 0, "--frames must be greater than zero");
+        anyhow::ensure!(
+            self.frame_skip_min <= self.frame_skip_max,
+            "--frame-skip-min must not exceed --frame-skip-max"
+        );
         let end_frame = self
             .warmup
             .checked_add(self.frames)
             .context("--warmup + --frames overflowed")?;
+        let maximum_frame_interval = u64::from(self.frame_skip_max) + 1;
+        let required_frame_upper_bound = u64::from(end_frame)
+            .checked_mul(maximum_frame_interval)
+            .context("required frame range overflowed")?;
         anyhow::ensure!(
-            i32::try_from(end_frame).is_ok(),
-            "--warmup + --frames exceeds the plugin API frame range"
+            i32::try_from(required_frame_upper_bound).is_ok(),
+            "requested frames exceed the plugin API frame range"
         );
         for video in &self.videos {
             anyhow::ensure!(video.is_file(), "Video does not exist: {}", video.display());
@@ -132,6 +152,9 @@ mod tests {
             thread_priority: ThreadPriority::Highest,
             warmup: 30,
             frames: 300,
+            read_delay_ms: 0,
+            frame_skip_min: 0,
+            frame_skip_max: 0,
             output: None,
             videos_dir: None,
             videos: Vec::new(),
@@ -142,5 +165,31 @@ mod tests {
             args.manifest_dir(),
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("videos")
         );
+    }
+
+    #[test]
+    fn read_delay_can_be_configured_in_milliseconds() {
+        let default_args = Args::try_parse_from(["benchmark", "plugin.dll"]).unwrap();
+        let args =
+            Args::try_parse_from(["benchmark", "plugin.dll", "--read-delay-ms", "10"]).unwrap();
+
+        assert_eq!(default_args.read_delay_ms, 0);
+        assert_eq!(args.read_delay_ms, 10);
+    }
+
+    #[test]
+    fn frame_skip_range_can_be_configured() {
+        let args = Args::try_parse_from([
+            "benchmark",
+            "plugin.dll",
+            "--frame-skip-min",
+            "1",
+            "--frame-skip-max",
+            "3",
+        ])
+        .unwrap();
+
+        assert_eq!(args.frame_skip_min, 1);
+        assert_eq!(args.frame_skip_max, 3);
     }
 }
